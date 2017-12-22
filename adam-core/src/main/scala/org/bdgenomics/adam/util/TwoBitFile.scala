@@ -18,13 +18,13 @@
 
 package org.bdgenomics.adam.util
 
-import java.nio.{ ByteOrder, ByteBuffer }
-import com.esotericsoftware.kryo.io.{ Output, Input }
+import java.nio.{ ByteBuffer, ByteOrder }
 import com.esotericsoftware.kryo.{ Kryo, Serializer }
-import org.bdgenomics.utils.io.{ ByteArrayByteAccess, ByteAccess }
-import org.bdgenomics.adam.models.{ NonoverlappingRegions, ReferencePosition, ReferenceRegion }
+import com.esotericsoftware.kryo.io.{ Input, Output }
+import org.bdgenomics.utils.io.{ ByteAccess, ByteArrayByteAccess }
+import org.bdgenomics.adam.models._
 
-object TwoBitFile {
+private object TwoBitFile {
   val MAGIC_NUMBER: Int = 0x1A412743
   val BASES_PER_BYTE: Int = 4
   val BYTE_SIZE: Int = 8
@@ -57,17 +57,26 @@ object TwoBitFile {
  * @param byteAccess ByteAccess pointing to a .2bit file.
  */
 class TwoBitFile(byteAccess: ByteAccess) extends ReferenceFile {
+
   // load file into memory
-  val bytes = ByteBuffer.wrap(byteAccess.readFully(0, byteAccess.length().toInt))
-  val numSeq = readHeader()
+  @transient private[util] val bytes = ByteBuffer.wrap(byteAccess.readFully(0, byteAccess.length().toInt))
+  private[util] val numSeq = readHeader()
   // hold current byte position of start of current index record
   var indexRecordStart = TwoBitFile.FILE_INDEX_OFFSET
-  private val seqRecordStarts = (0 until numSeq).map(i => {
-    val tup = readIndexEntry(indexRecordStart)
-    indexRecordStart += TwoBitFile.NAME_SIZE_SIZE + tup._1.length + TwoBitFile.OFFSET_SIZE
-    tup
-  }).toMap
-  val seqRecords = seqRecordStarts.map(tup => tup._1 -> TwoBitRecord(bytes, tup._1, tup._2)).toMap
+  private[util] val seqRecords = (0 until numSeq).map(idx => {
+    val (name, startIdx) = readIndexEntry(indexRecordStart)
+    indexRecordStart += TwoBitFile.NAME_SIZE_SIZE + name.length + TwoBitFile.OFFSET_SIZE
+    (name, TwoBitRecord(bytes, name, startIdx, idx))
+  })
+  private val seqRecordsMap = seqRecords.toMap
+
+  /**
+   * The sequence dictionary corresponding to the contigs in this two bit file.
+   */
+  val sequences = new SequenceDictionary(seqRecords.toVector
+    .map(r => SequenceRecord(r._1,
+      r._2.dnaSize,
+      referenceIndex = Some(r._2.seqIdx))))
 
   private def readHeader(): Int = {
     // figure out proper byte order
@@ -101,10 +110,10 @@ class TwoBitFile(byteAccess: ByteAccess) extends ReferenceFile {
    */
   def extract(region: ReferenceRegion, mask: Boolean): String = {
     val record =
-      seqRecords.getOrElse(
+      seqRecordsMap.getOrElse(
         region.referenceName,
         throw new Exception(
-          s"Contig ${region.referenceName} not found in reference map with keys: ${seqRecords.keys.toList.sortBy(x => x).mkString(", ")}"
+          s"Contig ${region.referenceName} not found in reference map with keys: ${seqRecordsMap.keys.toList.sortBy(x => x).mkString(", ")}"
         )
       )
     val contigLength = record.dnaSize
@@ -113,28 +122,32 @@ class TwoBitFile(byteAccess: ByteAccess) extends ReferenceFile {
     val offset = record.dnaOffset
     val sb = StringBuilder.newBuilder
 
-    // define predicate for N blocks
-    val isNBlock = if (record.nBlocks.forall(!_.hasRegionsFor(region -> None))) {
-      // our region has no overlap with an N block, so the predicate is trivial
-      pos: Long => false
+    val nBlocks: Array[Long] = if (record.nBlocks.isEmpty) {
+      Array(-1L)
     } else {
-      // our region does have some kind of overlap with N blocks, so we need to check each position
-      pos: Long => record.nBlocks.get.findOverlappingRegions(ReferencePosition(region.referenceName, pos)).nonEmpty
+      record.nBlocks.get.endpoints ++ Array(-1L)
+    }
+    val maskBlocks: Array[Long] = if (record.maskBlocks.isEmpty) {
+      Array(-1L)
+    } else {
+      record.maskBlocks.get.endpoints ++ Array(-1L)
     }
 
-    // define predicate for mask blocks
-    val isMaskBlock = if (record.maskBlocks.forall(!_.hasRegionsFor(region -> None))) {
-      // our region has no overlap with a mask block, so the predicate is trivial
-      pos: Long => false
-    } else {
-      // our region does have some kind of overlap with mask blocks, so we need to check each position
-      pos: Long => record.maskBlocks.get.findOverlappingRegions(ReferencePosition(region.referenceName, pos)).nonEmpty
+    var currentNBlock = 0
+    var currentMaskBlock = 0
+    while (nBlocks(currentNBlock) != -1 && region.start.toInt >= nBlocks(currentNBlock + 1)) {
+      currentNBlock += 2
+    }
+    while (maskBlocks(currentMaskBlock) != -1 && region.start.toInt >= maskBlocks(currentMaskBlock + 1)) {
+      currentMaskBlock += 2
     }
 
-    // iterate over every position in the query region
-    (0 until region.width.toInt).foreach(i => {
-      // check whether we're in an N block
-      val nt = if (isNBlock(region.start + i)) {
+    for (i <- 0 until region.width.toInt) {
+      // we step into an N block
+      val nt = if (nBlocks(currentNBlock) != -1 && region.start.toInt + i >= nBlocks(currentNBlock)) {
+        if (region.start.toInt + i + 1 == nBlocks(currentNBlock + 1)) {
+          currentNBlock += 2
+        }
         'N'
       } else {
         // TODO: this redundantly reads the byte at a given offset
@@ -154,9 +167,16 @@ class TwoBitFile(byteAccess: ByteAccess) extends ReferenceFile {
         }
       }
       // if nt is masked then make it lower case
-      val maskedNt = if (mask && isMaskBlock(region.start + i)) nt.toLower else nt
+      val maskedNt = if (mask && maskBlocks(currentMaskBlock) != -1 && region.start.toInt + i >= maskBlocks(currentMaskBlock)) {
+        if (region.start.toInt + i + 1 == maskBlocks(currentMaskBlock + 1)) {
+          currentMaskBlock += 2
+        }
+        nt.toLower
+      } else {
+        nt
+      }
       sb += maskedNt
-    })
+    }
     sb.toString()
   }
 
@@ -185,8 +205,8 @@ class TwoBitFileSerializer extends Serializer[TwoBitFile] {
   }
 }
 
-private[util] object TwoBitRecord {
-  def apply(twoBitBytes: ByteBuffer, name: String, seqRecordStart: Int): TwoBitRecord = {
+private object TwoBitRecord {
+  def apply(twoBitBytes: ByteBuffer, name: String, seqRecordStart: Int, seqIdx: Int): TwoBitRecord = {
     val dnaSize = twoBitBytes.getInt(seqRecordStart)
     val nBlockCount = twoBitBytes.getInt(seqRecordStart + TwoBitFile.DNA_SIZE_SIZE)
     val nBlockArraysOffset = seqRecordStart + TwoBitFile.DNA_SIZE_SIZE + TwoBitFile.BLOCK_COUNT_SIZE
@@ -205,8 +225,13 @@ private[util] object TwoBitRecord {
       ReferenceRegion(name, maskBlockStart, maskBlockStart + maskBlockSize) -> None
     })))
     val dnaOffset = maskBlockArraysOffset + (maskBlockCount * TwoBitFile.PER_BLOCK_SIZE) + TwoBitFile.SEQ_RECORD_RESERVED_SIZE
-    TwoBitRecord(dnaSize, nBlocks, maskBlocks, dnaOffset)
+    TwoBitRecord(dnaSize, nBlocks, maskBlocks, dnaOffset, seqIdx)
   }
 }
 
-private[util] case class TwoBitRecord(dnaSize: Int, nBlocks: Option[NonoverlappingRegions], maskBlocks: Option[NonoverlappingRegions], dnaOffset: Int)
+private case class TwoBitRecord(dnaSize: Int,
+                                nBlocks: Option[NonoverlappingRegions],
+                                maskBlocks: Option[NonoverlappingRegions],
+                                dnaOffset: Int,
+                                seqIdx: Int) {
+}

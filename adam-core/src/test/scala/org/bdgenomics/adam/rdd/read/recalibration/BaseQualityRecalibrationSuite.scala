@@ -19,50 +19,57 @@ package org.bdgenomics.adam.rdd.read.recalibration
 
 import java.io.File
 import org.apache.spark.rdd.RDD
+import org.apache.spark.storage.StorageLevel
 import org.bdgenomics.adam.models.SnpTable
 import org.bdgenomics.adam.rdd.ADAMContext._
-import org.bdgenomics.adam.rich.DecadentRead._
-import org.bdgenomics.adam.rich.RichVariant
 import org.bdgenomics.adam.util.ADAMFunSuite
 import org.bdgenomics.formats.avro.AlignmentRecord
+import scala.io.Source
 
 class BaseQualityRecalibrationSuite extends ADAMFunSuite {
-  sparkTest("BQSR Test Input #1") {
-    val readsFilepath = resourcePath("bqsr1.sam")
-    val snpsFilepath = resourcePath("bqsr1.snps")
-    val obsFilepath = resourcePath("bqsr1-ref.observed")
 
-    val reads: RDD[AlignmentRecord] = sc.loadAlignments(readsFilepath)
-    val snps = sc.broadcast(SnpTable(new File(snpsFilepath)))
+  def testBqsr(optSl: Option[StorageLevel]) {
+    val readsFilepath = testFile("bqsr1.sam")
+    val snpsFilepath = testFile("bqsr1.vcf")
+    val obsFilepath = testFile("bqsr1-ref.observed")
 
-    val bqsr = new BaseQualityRecalibration(cloy(reads), snps)
+    val rdd = sc.loadAlignments(readsFilepath)
+    val reads: RDD[AlignmentRecord] = rdd.rdd
+    val variants = sc.loadVariants(snpsFilepath)
+    val snps = sc.broadcast(SnpTable(variants))
+
+    val bqsr = new BaseQualityRecalibration(reads,
+      snps,
+      rdd.recordGroups,
+      optStorageLevel = optSl)
 
     // Sanity checks
     assert(bqsr.result.count == reads.count)
 
     // Compare the ObservationTables
-    val referenceObs: Seq[String] = scala.io.Source.fromFile(new File(obsFilepath)).getLines().filter(_.length > 0).toSeq.sortWith((kv1, kv2) => kv1.compare(kv2) < 0)
-    val testObs: Seq[String] = bqsr.observed.toCSV.split('\n').filter(_.length > 0).toSeq.sortWith((kv1, kv2) => kv1.compare(kv2) < 0)
+    val referenceObs: Seq[String] = Source.fromFile(new File(obsFilepath))
+      .getLines()
+      .filter(_.length > 0)
+      .toSeq
+      .sortWith((kv1, kv2) => kv1.compare(kv2) < 0)
+    val testObs: Seq[String] = bqsr.observed
+      .toCSV(rdd.recordGroups)
+      .split('\n')
+      .filter(_.length > 0)
+      .toSeq
+      .sortWith((kv1, kv2) => kv1.compare(kv2) < 0)
     referenceObs.zip(testObs).foreach(p => assert(p._1 === p._2))
   }
 
-  sparkTest("BQSR Test Input #1 w/ VCF Sites") {
-    val readsFilepath = resourcePath("bqsr1.sam")
-    val snpsFilepath = resourcePath("bqsr1.vcf")
-    val obsFilepath = resourcePath("bqsr1-ref.observed")
+  sparkTest("BQSR Test Input #1 w/ VCF Sites without caching") {
+    testBqsr(None)
+  }
 
-    val reads: RDD[AlignmentRecord] = sc.loadAlignments(readsFilepath)
-    val variants: RDD[RichVariant] = sc.loadVariants(snpsFilepath).map(new RichVariant(_))
-    val snps = sc.broadcast(SnpTable(variants))
+  sparkTest("BQSR Test Input #1 w/ VCF Sites with caching") {
+    testBqsr(Some(StorageLevel.MEMORY_ONLY))
+  }
 
-    val bqsr = new BaseQualityRecalibration(cloy(reads), snps)
-
-    // Sanity checks
-    assert(bqsr.result.count == reads.count)
-
-    // Compare the ObservationTables
-    val referenceObs: Seq[String] = scala.io.Source.fromFile(new File(obsFilepath)).getLines().filter(_.length > 0).toSeq.sortWith((kv1, kv2) => kv1.compare(kv2) < 0)
-    val testObs: Seq[String] = bqsr.observed.toCSV.split('\n').filter(_.length > 0).toSeq.sortWith((kv1, kv2) => kv1.compare(kv2) < 0)
-    referenceObs.zip(testObs).foreach(p => assert(p._1 === p._2))
+  sparkTest("BQSR Test Input #1 w/ VCF Sites with serialized caching") {
+    testBqsr(Some(StorageLevel.MEMORY_ONLY))
   }
 }

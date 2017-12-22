@@ -17,8 +17,9 @@
  */
 package org.bdgenomics.adam.models
 
+import org.bdgenomics.adam.algorithms.consensus.Consensus
 import org.bdgenomics.adam.util.ADAMFunSuite
-import org.bdgenomics.formats.avro.{ Contig, Variant }
+import org.bdgenomics.formats.avro.Variant
 
 class IndelTableSuite extends ADAMFunSuite {
 
@@ -38,20 +39,14 @@ class IndelTableSuite extends ADAMFunSuite {
   }
 
   sparkTest("build indel table from rdd of variants") {
-    val ctg1 = Contig.newBuilder()
-      .setContigName("1")
-      .build()
-    val ctg2 = Contig.newBuilder()
-      .setContigName("2")
-      .build()
     val ins = Variant.newBuilder()
-      .setContig(ctg1)
+      .setContigName("1")
       .setStart(1000L)
       .setReferenceAllele("A")
       .setAlternateAllele("ATT")
       .build()
     val del = Variant.newBuilder()
-      .setContig(ctg2)
+      .setContigName("2")
       .setStart(50L)
       .setReferenceAllele("ACAT")
       .setAlternateAllele("A")
@@ -75,7 +70,7 @@ class IndelTableSuite extends ADAMFunSuite {
     assert(delT.head.consensus === "")
     assert(delT.head.index.referenceName === "2")
     assert(delT.head.index.start === 51)
-    assert(delT.head.index.end === 54)
+    assert(delT.head.index.end === 55)
   }
 
 }

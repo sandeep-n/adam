@@ -15,10 +15,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.bdgenomics.adam.util
 
-import org.bdgenomics.adam.models.ReferenceRegion
+import org.bdgenomics.adam.models.{ ReferenceRegion, SequenceDictionary }
 
 /**
  * File that contains a reference assembly that can be broadcasted
@@ -31,4 +30,9 @@ trait ReferenceFile extends Serializable {
    * @return The reference sequence at the desired locus.
    */
   def extract(region: ReferenceRegion): String
+
+  /*
+   * Stores SequenceDictionary for ReferenceFile
+   */
+  def sequences: SequenceDictionary
 }

@@ -17,27 +17,16 @@
  */
 package org.bdgenomics.adam.models
 
-import org.bdgenomics.formats.avro.{ Genotype, DatabaseVariantAnnotation, Variant }
+import com.esotericsoftware.kryo.io.{ Input, Output }
+import com.esotericsoftware.kryo.{ Kryo, Serializer }
 import org.bdgenomics.adam.rich.RichVariant
-import org.bdgenomics.adam.rich.RichVariant._
+import org.bdgenomics.adam.serialization.AvroSerializer
+import org.bdgenomics.formats.avro.{ Genotype, Variant, VariantAnnotation }
 
 /**
- * Note: VariantContext inherits its name from the Picard VariantContext, and is not related to the SparkContext object.
- * If you're looking for the latter, see [[org.bdgenomics.adam.rdd.variation.VariationContext]]
+ * Singleton object for building VariantContexts.
  */
-
 object VariantContext {
-
-  /**
-   * Constructs an VariantContext from locus data. Used in merger process.
-   *
-   * @param kv Nested tuple containing (locus on reference, (variants at site, genotypes at site,
-   *           optional domain annotation at site))
-   * @return VariantContext corresponding to the data above.
-   */
-  def apply(kv: (ReferencePosition, Variant, Iterable[Genotype], Option[DatabaseVariantAnnotation])): VariantContext = {
-    new VariantContext(kv._1, kv._2, kv._3, kv._4)
-  }
 
   /**
    * Constructs an VariantContext from an Variant
@@ -46,7 +35,7 @@ object VariantContext {
    * @return VariantContext corresponding to the Variant
    */
   def apply(v: Variant): VariantContext = {
-    apply((ReferencePosition(v), v, Seq(), None))
+    new VariantContext(ReferencePosition(v), RichVariant(v), Iterable.empty)
   }
 
   /**
@@ -55,11 +44,10 @@ object VariantContext {
    *
    * @param v Variant which is used to construct the ReferencePosition
    * @param genotypes Seq[Genotype]
-   * @param annotation Option[DatabaseVariantAnnotation]
    * @return VariantContext corresponding to the Variant
    */
-  def apply(v: Variant, genotypes: Iterable[Genotype], annotation: Option[DatabaseVariantAnnotation] = None): VariantContext = {
-    apply((ReferencePosition(v), v, genotypes, annotation))
+  def apply(v: Variant, genotypes: Iterable[Genotype]): VariantContext = {
+    new VariantContext(ReferencePosition(v), RichVariant(v), genotypes)
   }
 
   /**
@@ -72,21 +60,54 @@ object VariantContext {
    */
   def buildFromGenotypes(genotypes: Seq[Genotype]): VariantContext = {
     val position = ReferencePosition(genotypes.head)
-    assert(
+    require(
       genotypes.map(ReferencePosition(_)).forall(_ == position),
       "Genotypes do not all have the same position."
     )
 
     val variant = genotypes.head.getVariant
 
-    new VariantContext(position, variant, genotypes, None)
+    new VariantContext(position, RichVariant(variant), genotypes)
   }
 }
 
+/**
+ * A representation of all variation data at a single variant.
+ *
+ * This class represents an equivalent to a single allele from a VCF line, and
+ * is the ADAM equivalent to htsjdk.variant.variantcontext.VariantContext.
+ *
+ * @param position The locus that the variant is at.
+ * @param variant The variant allele that is contained in this VariantContext.
+ * @param genotypes An iterable collection of Genotypes where this allele was
+ *   called. Equivalent to the per-sample FORMAT fields in a VCF.
+ */
 class VariantContext(
     val position: ReferencePosition,
     val variant: RichVariant,
-    val genotypes: Iterable[Genotype],
-    val databases: Option[DatabaseVariantAnnotation] = None) {
+    val genotypes: Iterable[Genotype]) extends Serializable {
 }
 
+class VariantContextSerializer extends Serializer[VariantContext] {
+
+  val rpSerializer = new ReferencePositionSerializer
+  val vSerializer = new AvroSerializer[Variant]
+  val gtSerializer = new AvroSerializer[Genotype]
+
+  def write(kryo: Kryo, output: Output, obj: VariantContext) = {
+    rpSerializer.write(kryo, output, obj.position)
+    vSerializer.write(kryo, output, obj.variant.variant)
+    output.writeInt(obj.genotypes.size)
+    obj.genotypes.foreach(gt => gtSerializer.write(kryo, output, gt))
+  }
+
+  def read(kryo: Kryo, input: Input, klazz: Class[VariantContext]): VariantContext = {
+    val rp = rpSerializer.read(kryo, input, classOf[ReferencePosition])
+    val v = vSerializer.read(kryo, input, classOf[Variant])
+    val gts = new Array[Genotype](input.readInt())
+    gts.indices.foreach(idx => {
+      gts(idx) = gtSerializer.read(kryo, input, classOf[Genotype])
+    })
+    new VariantContext(rp, new RichVariant(v), gts.toIterable)
+  }
+}

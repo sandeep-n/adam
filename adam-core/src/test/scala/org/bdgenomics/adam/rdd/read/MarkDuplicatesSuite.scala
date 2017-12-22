@@ -18,8 +18,11 @@
 package org.bdgenomics.adam.rdd.read
 
 import java.util.UUID
-import org.bdgenomics.adam.models.{ RecordGroup, RecordGroupDictionary }
-import org.bdgenomics.adam.rdd.ADAMContext._
+import org.bdgenomics.adam.models.{
+  RecordGroup,
+  RecordGroupDictionary,
+  SequenceDictionary
+}
 import org.bdgenomics.adam.util.ADAMFunSuite
 import org.bdgenomics.formats.avro.{ AlignmentRecord, Contig }
 
@@ -33,6 +36,7 @@ class MarkDuplicatesSuite extends ADAMFunSuite {
   def createUnmappedRead() = {
     AlignmentRecord.newBuilder()
       .setReadMapped(false)
+      .setSequence("ACGT")
       .build()
   }
 
@@ -49,7 +53,7 @@ class MarkDuplicatesSuite extends ADAMFunSuite {
       .build
 
     AlignmentRecord.newBuilder()
-      .setContig(contig)
+      .setContigName(contig.getContigName)
       .setStart(start)
       .setQual(qual)
       .setCigar(cigar)
@@ -60,6 +64,7 @@ class MarkDuplicatesSuite extends ADAMFunSuite {
       .setRecordGroupName("machine foo")
       .setDuplicateRead(false)
       .setReadNegativeStrand(isNegativeStrand)
+      .setSequence("ACGT")
       .build()
   }
 
@@ -79,21 +84,24 @@ class MarkDuplicatesSuite extends ADAMFunSuite {
       readName = readName, avgPhredScore = avgPhredScore)
     firstOfPair.setReadInFragment(0)
     firstOfPair.setMateMapped(true)
-    firstOfPair.setMateContig(secondContig)
+    firstOfPair.setMateContigName(secondContig.getContigName)
     firstOfPair.setMateAlignmentStart(secondStart)
     firstOfPair.setReadPaired(true)
     val secondOfPair = createMappedRead(secondReferenceName, secondStart, secondEnd,
       readName = readName, avgPhredScore = avgPhredScore, isNegativeStrand = true)
     secondOfPair.setReadInFragment(1)
     secondOfPair.setMateMapped(true)
-    secondOfPair.setMateContig(firstContig)
+    secondOfPair.setMateContigName(firstContig.getContigName)
     secondOfPair.setMateAlignmentStart(firstStart)
     secondOfPair.setReadPaired(true)
     Seq(firstOfPair, secondOfPair)
   }
 
-  private def markDuplicates(reads: AlignmentRecord*) = {
-    sc.parallelize(reads).adamMarkDuplicates(rgd).collect()
+  private def markDuplicates(reads: AlignmentRecord*): Array[AlignmentRecord] = {
+    AlignmentRecordRDD(sc.parallelize(reads), SequenceDictionary.empty, rgd, Seq.empty)
+      .markDuplicates()
+      .rdd
+      .collect()
   }
 
   sparkTest("single read") {
@@ -198,4 +206,107 @@ class MarkDuplicatesSuite extends ADAMFunSuite {
     assert(dups.forall(p => p.getReadName.startsWith("poor")))
   }
 
+  private def markDuplicateFragments(reads: AlignmentRecord*): Array[AlignmentRecord] = {
+    AlignmentRecordRDD(sc.parallelize(reads), SequenceDictionary.empty, rgd, Seq.empty)
+      .toFragments
+      .markDuplicates()
+      .toReads
+      .rdd
+      .collect()
+  }
+
+  sparkTest("single fragment") {
+    val read = createMappedRead("0", 100, 200)
+    val marked = markDuplicateFragments(read)
+    // Can't have duplicates with a single read, should return the read unchanged.
+    assert(marked(0) == read)
+  }
+
+  sparkTest("fragments at different positions") {
+    val read1 = createMappedRead("0", 42, 142)
+    val read2 = createMappedRead("0", 43, 143)
+    val marked = markDuplicateFragments(read1, read2)
+    // Reads shouldn't be modified
+    assert(marked.contains(read1) && marked.contains(read2))
+  }
+
+  sparkTest("fragments at the same position") {
+    val poorReads = for (i <- 0 until 10) yield {
+      createMappedRead("1", 42, 142, avgPhredScore = 20, readName = "poor%d".format(i))
+    }
+    val bestRead = createMappedRead("1", 42, 142, avgPhredScore = 30, readName = "best")
+    val marked = markDuplicateFragments(List(bestRead) ++ poorReads: _*)
+    val (dups, nonDup) = marked.partition(p => p.getDuplicateRead)
+    assert(nonDup.size == 1 && nonDup(0) == bestRead)
+    assert(dups.forall(p => p.getReadName.startsWith("poor")))
+  }
+
+  sparkTest("fragments at the same position with clipping") {
+    val poorClippedReads = for (i <- 0 until 5) yield {
+      createMappedRead("1", 44, 142, numClippedBases = 2, avgPhredScore = 20, readName = "poorClipped%d".format(i))
+    }
+    val poorUnclippedReads = for (i <- 0 until 5) yield {
+      createMappedRead("1", 42, 142, avgPhredScore = 20, readName = "poorUnclipped%d".format(i))
+    }
+    val bestRead = createMappedRead("1", 42, 142, avgPhredScore = 30, readName = "best")
+    val marked = markDuplicateFragments(List(bestRead) ++ poorClippedReads ++ poorUnclippedReads: _*)
+    val (dups, nonDup) = marked.partition(p => p.getDuplicateRead)
+    assert(nonDup.size == 1 && nonDup(0) == bestRead)
+    assert(dups.forall(p => p.getReadName.startsWith("poor")))
+  }
+
+  sparkTest("fragments on reverse strand") {
+    val poorReads = for (i <- 0 until 7) yield {
+      createMappedRead("10", 42, 142, isNegativeStrand = true, avgPhredScore = 20, readName = "poor%d".format(i))
+    }
+    val bestRead = createMappedRead("10", 42, 142, isNegativeStrand = true, avgPhredScore = 30, readName = "best")
+    val marked = markDuplicateFragments(List(bestRead) ++ poorReads: _*)
+    val (dups, nonDup) = marked.partition(p => p.getDuplicateRead)
+    assert(nonDup.size == 1 && nonDup(0) == bestRead)
+    assert(dups.forall(p => p.getReadName.startsWith("poor")))
+  }
+
+  sparkTest("unmapped fragments") {
+    val unmappedReads = for (i <- 0 until 10) yield createUnmappedRead()
+    val marked = markDuplicateFragments(unmappedReads: _*)
+    assert(marked.size == unmappedReads.size)
+    // Unmapped reads should never be marked duplicates
+    assert(marked.forall(p => !p.getDuplicateRead))
+  }
+
+  sparkTest("read pairs as fragments") {
+    val poorPairs = for (
+      i <- 0 until 10;
+      read <- createPair("0", 10, 110, "0", 110, 210, avgPhredScore = 20, readName = "poor%d".format(i))
+    ) yield read
+    val bestPair = createPair("0", 10, 110, "0", 110, 210, avgPhredScore = 30, readName = "best")
+    val marked = markDuplicateFragments(bestPair ++ poorPairs: _*)
+    val (dups, nonDups) = marked.partition(_.getDuplicateRead)
+    assert(nonDups.size == 2 && nonDups.forall(p => p.getReadName.toString == "best"))
+    assert(dups.forall(p => p.getReadName.startsWith("poor")))
+  }
+
+  sparkTest("read pairs with fragments as fragments") {
+    val fragments = for (i <- 0 until 10) yield {
+      createMappedRead("2", 33, 133, avgPhredScore = 40, readName = "fragment%d".format(i))
+    }
+    // Even though the phred score is lower, pairs always score higher than fragments
+    val pairs = createPair("2", 33, 133, "2", 100, 200, avgPhredScore = 20, readName = "pair")
+    val marked = markDuplicateFragments(fragments ++ pairs: _*)
+    val (dups, nonDups) = marked.partition(_.getDuplicateRead)
+    assert(nonDups.size == 2 && nonDups.forall(p => p.getReadName.toString == "pair"))
+    assert(dups.size == 10 && dups.forall(p => p.getReadName.startsWith("fragment")))
+  }
+
+  sparkTest("chimeric fragments") {
+    val poorPairs = for (
+      i <- 0 until 10;
+      read <- createPair("ref0", 10, 110, "ref1", 110, 210, avgPhredScore = 20, readName = "poor%d".format(i))
+    ) yield read
+    val bestPair = createPair("ref0", 10, 110, "ref1", 110, 210, avgPhredScore = 30, readName = "best")
+    val marked = markDuplicateFragments(bestPair ++ poorPairs: _*)
+    val (dups, nonDups) = marked.partition(_.getDuplicateRead)
+    assert(nonDups.size == 2 && nonDups.forall(p => p.getReadName.toString == "best"))
+    assert(dups.forall(p => p.getReadName.startsWith("poor")))
+  }
 }

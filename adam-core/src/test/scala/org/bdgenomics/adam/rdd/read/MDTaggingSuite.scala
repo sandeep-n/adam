@@ -17,10 +17,10 @@
  */
 package org.bdgenomics.adam.rdd.read
 
+import htsjdk.samtools.ValidationStringency
 import org.apache.spark.rdd.RDD
-import org.bdgenomics.adam.util.{ ReferenceContigMap, ADAMFunSuite }
-import org.bdgenomics.formats.avro.{ AlignmentRecord, NucleotideContigFragment, Contig }
-import org.bdgenomics.utils.misc.SparkFunSuite
+import org.bdgenomics.adam.util.{ ADAMFunSuite, ReferenceContigMap }
+import org.bdgenomics.formats.avro.{ AlignmentRecord, Contig, NucleotideContigFragment }
 
 class MDTaggingSuite extends ADAMFunSuite {
   val chr1 =
@@ -29,12 +29,25 @@ class MDTaggingSuite extends ADAMFunSuite {
       .setContigName("chr1")
       .setContigLength(100L)
       .build()
+  val chr2 =
+    Contig
+      .newBuilder()
+      .setContigName("chr2")
+      .setContigLength(100L)
+      .build()
 
   def makeFrags(frags: (Contig, Int, String)*): RDD[NucleotideContigFragment] =
     sc.parallelize(
       for {
         (contig, start, seq) <- frags
-      } yield NucleotideContigFragment.newBuilder().setContig(contig).setFragmentStartPosition(start.toLong).setFragmentSequence(seq).build()
+      } yield (
+        NucleotideContigFragment.newBuilder()
+        .setContigLength(contig.getContigLength)
+        .setContigName(contig.getContigName)
+        .setStart(start.toLong)
+        .setEnd(start.toLong + seq.length)
+        .setSequence(seq).build()
+      )
     )
 
   def makeReads(reads: ((Contig, Int, Int, String, String), String)*): (Map[Int, String], RDD[AlignmentRecord]) = {
@@ -45,7 +58,7 @@ class MDTaggingSuite extends ADAMFunSuite {
         id -> mdTag,
         AlignmentRecord
         .newBuilder
-        .setContig(contig)
+        .setContigName(contig.getContigName)
         .setStart(start.toLong)
         .setEnd(end.toLong)
         .setSequence(seq)
@@ -75,9 +88,7 @@ class MDTaggingSuite extends ADAMFunSuite {
       )
     }
 
-    for (i <- List(1, 10)) {
-      check(MDTagging(reads, ReferenceContigMap(makeFrags(fs: _*)), partitionSize = i))
-    }
+    check(MDTagging(reads, ReferenceContigMap(makeFrags(fs: _*))))
   }
 
   sparkTest("test adding MDTags over boundary") {
@@ -166,5 +177,22 @@ class MDTaggingSuite extends ADAMFunSuite {
         (chr1, 15, 35, "AAAATTCCCCCCCCCGGGGG", "20M") → "4A0C14",
         (chr1, 15, 35, "AAAAACCCCCCCCCTTGGGG", "20M") → "14C0G4"
       )(5, 0, 0, 0)
+  }
+
+  sparkTest("try realigning a read on a missing contig, stringency == STRICT") {
+    val read = (chr2, 15, 35, "AAAAACCCCCCCCCCGGGGG", "20M") → "20"
+    val tagger = MDTagging(makeReads(read)._2,
+      ReferenceContigMap(makeFrags((chr1, 0, "TTTTTTTTTT"))))
+    intercept[Exception] {
+      tagger.taggedReads.collect
+    }
+  }
+
+  sparkTest("try realigning a read on a missing contig, stringency == LENIENT") {
+    val read = (chr2, 15, 35, "AAAAACCCCCCCCCCGGGGG", "20M") → "20"
+    val tagger = MDTagging(makeReads(read)._2,
+      ReferenceContigMap(makeFrags((chr1, 0, "TTTTTTTTTT"))),
+      validationStringency = ValidationStringency.LENIENT)
+    assert(tagger.taggedReads.collect.size === 1)
   }
 }

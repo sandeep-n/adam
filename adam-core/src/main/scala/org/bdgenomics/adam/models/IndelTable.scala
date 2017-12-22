@@ -17,13 +17,14 @@
  */
 package org.bdgenomics.adam.models
 
-import org.apache.spark.{ Logging, SparkContext }
-import org.apache.spark.SparkContext._
+import org.apache.spark.SparkContext
 import org.apache.spark.rdd.RDD
+import org.bdgenomics.adam.algorithms.consensus.Consensus
 import org.bdgenomics.adam.rdd.ADAMContext._
 import org.bdgenomics.formats.avro.Variant
+import org.bdgenomics.utils.misc.Logging
 
-class IndelTable(private val table: Map[String, Iterable[Consensus]]) extends Serializable with Logging {
+private[adam] class IndelTable(private val table: Map[String, Iterable[Consensus]]) extends Serializable with Logging {
   log.info("Indel table has %s contigs and %s entries".format(
     table.size,
     table.values.map(_.size).sum
@@ -46,19 +47,7 @@ class IndelTable(private val table: Map[String, Iterable[Consensus]]) extends Se
   }
 }
 
-object IndelTable {
-
-  /**
-   * Creates an indel table from a file containing known indels.
-   *
-   * @param knownIndelsFile Path to file with known indels.
-   * @param sc SparkContext to use for loading.
-   * @return Returns a table with the known indels populated.
-   */
-  def apply(knownIndelsFile: String, sc: SparkContext): IndelTable = {
-    val rdd: RDD[Variant] = sc.loadVariants(knownIndelsFile)
-    apply(rdd)
-  }
+private[adam] object IndelTable {
 
   /**
    * Creates an indel table from an RDD containing known variants.
@@ -69,17 +58,18 @@ object IndelTable {
   def apply(variants: RDD[Variant]): IndelTable = {
     val consensus: Map[String, Iterable[Consensus]] = variants.filter(v => v.getReferenceAllele.length != v.getAlternateAllele.length)
       .map(v => {
-        val referenceName = v.getContig.getContigName
+        val referenceName = v.getContigName
         val consensus = if (v.getReferenceAllele.length > v.getAlternateAllele.length) {
           // deletion
           val deletionLength = v.getReferenceAllele.length - v.getAlternateAllele.length
           val start = v.getStart + v.getAlternateAllele.length
 
-          Consensus("", ReferenceRegion(referenceName, start, start + deletionLength))
+          Consensus("", ReferenceRegion(referenceName, start, start + deletionLength + 1))
         } else {
           val start = v.getStart + v.getReferenceAllele.length
 
-          Consensus(v.getAlternateAllele.drop(v.getReferenceAllele.length), ReferenceRegion(referenceName, start, start + 1))
+          Consensus(v.getAlternateAllele.drop(v.getReferenceAllele.length),
+            ReferenceRegion(referenceName, start, start + 1))
         }
 
         (referenceName, consensus)

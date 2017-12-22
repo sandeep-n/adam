@@ -17,46 +17,22 @@
  */
 package org.bdgenomics.adam.util
 
-import java.nio.file.Files
-
-import com.google.common.io.Resources
-
+import htsjdk.samtools.util.Log
+import java.util.logging.Level
 import org.bdgenomics.utils.misc.SparkFunSuite
 
-import scala.io.Source
+abstract class ADAMFunSuite extends SparkFunSuite {
 
-trait ADAMFunSuite extends SparkFunSuite {
+  // added to resolve #1280
+  Log.setGlobalLogLevel(Log.LogLevel.ERROR)
 
   override val appName: String = "adam"
   override val properties: Map[String, String] = Map(
-    ("spark.serializer", "org.apache.spark.serializer.KryoSerializer"),
-    ("spark.kryo.registrator", "org.bdgenomics.adam.serialization.ADAMKryoRegistrator"),
-    ("spark.kryo.referenceTracking", "true"))
+    "spark.serializer" -> "org.apache.spark.serializer.KryoSerializer",
+    "spark.kryo.registrator" -> "org.bdgenomics.adam.serialization.ADAMKryoRegistrator",
+    "spark.kryo.referenceTracking" -> "true",
+    "spark.kryo.registrationRequired" -> "true"
+  )
 
-  def resourcePath(path: String) = ClassLoader.getSystemClassLoader.getResource(path).getFile
-  def tmpFile(path: String) = Files.createTempDirectory("").toAbsolutePath.toString + "/" + path
-
-  def checkFiles(expectedPath: String, actualPath: String): Unit = {
-    val actualFile = Source.fromFile(actualPath)
-    val actualLines = actualFile.getLines.toList
-
-    val expectedFile = Source.fromFile(expectedPath)
-    val expectedLines = expectedFile.getLines.toList
-
-    assert(expectedLines.size === actualLines.size)
-    expectedLines.zip(actualLines).zipWithIndex.foreach {
-      case ((expected, actual), idx) =>
-        assert(
-          expected == actual,
-          s"Line ${idx + 1} differs.\nExpected:\n${expectedLines.mkString("\n")}\n\nActual:\n${actualLines.mkString("\n")}"
-        )
-    }
-  }
-
-  def copyResource(name: String): String = {
-    val tempFile = Files.createTempFile(name, "." + name.split('.').last)
-    Files.write(tempFile, Resources.toByteArray(getClass().getResource("/" + name)))
-    tempFile.toString
-  }
 }
 

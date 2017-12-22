@@ -20,29 +20,15 @@ package org.bdgenomics.adam.rdd.read.realignment
 import com.esotericsoftware.kryo.io.{ Input, Output }
 import com.esotericsoftware.kryo.{ Kryo, Serializer }
 import htsjdk.samtools.CigarOperator
-import org.apache.spark.Logging
+import org.bdgenomics.utils.misc.Logging
 import org.bdgenomics.adam.models.ReferenceRegion
-import org.bdgenomics.adam.rdd.ADAMContext._
 import org.bdgenomics.adam.rich.RichAlignmentRecord
 import org.bdgenomics.formats.avro.AlignmentRecord
 import org.bdgenomics.adam.instrumentation.Timers._
+import scala.collection.JavaConversions._
 import scala.collection.immutable.TreeSet
 
-object ZippedTargetOrdering extends Ordering[(IndelRealignmentTarget, Int)] {
-
-  /**
-   * Order two indel realignment targets by earlier starting position.
-   *
-   * @param a Indel realignment target to compare.
-   * @param b Indel realignment target to compare.
-   * @return Comparison done by starting position.
-   */
-  def compare(a: (IndelRealignmentTarget, Int), b: (IndelRealignmentTarget, Int)): Int = {
-    TargetOrdering.compare(a._1, b._1)
-  }
-}
-
-object TargetOrdering extends Ordering[IndelRealignmentTarget] {
+private[realignment] object TargetOrdering extends Ordering[IndelRealignmentTarget] {
 
   /**
    * Order two indel realignment targets by earlier starting position.
@@ -65,7 +51,7 @@ object TargetOrdering extends Ordering[IndelRealignmentTarget] {
   }
 
   /**
-   * Compares a read to an indel realignment target to see if it starts before the start of the indel realignment target.
+   * Compares a read to an indel realignment target to see if the target is before the read.
    *
    * @param target Realignment target to compare.
    * @param read Read to compare.
@@ -88,7 +74,7 @@ object TargetOrdering extends Ordering[IndelRealignmentTarget] {
   }
 }
 
-object IndelRealignmentTarget {
+private[realignment] object IndelRealignmentTarget {
 
   /**
    * Generates 1+ indel realignment targets from a single read.
@@ -101,8 +87,8 @@ object IndelRealignmentTarget {
     read: RichAlignmentRecord,
     maxIndelSize: Int): Seq[IndelRealignmentTarget] = CreateIndelRealignmentTargets.time {
 
-    val region = ReferenceRegion(read.record)
-    val refId = read.record.getContig.getContigName
+    val region = ReferenceRegion.unstranded(read.record)
+    val refId = read.record.getContigName
     var pos = List[ReferenceRegion]()
     var referencePos = read.record.getStart
     val cigar = read.samtoolsCigar
@@ -127,7 +113,7 @@ object IndelRealignmentTarget {
       })
 
     // if we have indels, emit those targets, else emit a target for this read
-    if (pos.isEmpty) {
+    if (pos.size != 1) {
       Seq(new IndelRealignmentTarget(None, region))
     } else {
       pos.map(ir => new IndelRealignmentTarget(Some(ir), region))
@@ -136,9 +122,36 @@ object IndelRealignmentTarget {
   }
 }
 
-class IndelRealignmentTarget(
+private[adam] class IndelRealignmentTargetSerializer extends Serializer[IndelRealignmentTarget] {
+
+  def write(kryo: Kryo, output: Output, obj: IndelRealignmentTarget) = {
+    output.writeString(obj.readRange.referenceName)
+    output.writeLong(obj.readRange.start)
+    output.writeLong(obj.readRange.end)
+    output.writeBoolean(obj.variation.isDefined)
+    obj.variation.foreach(r => {
+      output.writeLong(r.start)
+      output.writeLong(r.end)
+    })
+  }
+
+  def read(kryo: Kryo, input: Input, klazz: Class[IndelRealignmentTarget]): IndelRealignmentTarget = {
+    val refName = input.readString()
+    val readRange = ReferenceRegion(refName, input.readLong(), input.readLong())
+    val variation = if (input.readBoolean()) {
+      Some(ReferenceRegion(refName, input.readLong(), input.readLong()))
+    } else {
+      None
+    }
+    new IndelRealignmentTarget(variation, readRange)
+  }
+}
+
+private[adam] class IndelRealignmentTarget(
     val variation: Option[ReferenceRegion],
     val readRange: ReferenceRegion) extends Logging {
+
+  assert(variation.map(r => r.referenceName).forall(_ == readRange.referenceName))
 
   override def toString(): String = {
     variation + " over " + readRange
@@ -169,39 +182,52 @@ class IndelRealignmentTarget(
   }
 }
 
-class TargetSetSerializer extends Serializer[TargetSet] {
+private[adam] class TargetSetSerializer extends Serializer[TargetSet] {
+
+  val irts = new IndelRealignmentTargetSerializer()
 
   def write(kryo: Kryo, output: Output, obj: TargetSet) = {
-    kryo.writeClassAndObject(output, obj.set.toList)
+    output.writeInt(obj.set.size)
+    obj.set.foreach(innerObj => {
+      irts.write(kryo, output, innerObj)
+    })
   }
 
   def read(kryo: Kryo, input: Input, klazz: Class[TargetSet]): TargetSet = {
-    new TargetSet(new TreeSet()(TargetOrdering)
-      .union(kryo.readClassAndObject(input).asInstanceOf[List[IndelRealignmentTarget]].toSet))
+    val size = input.readInt()
+    val array = new Array[IndelRealignmentTarget](size)
+    (0 until size).foreach(i => {
+      array(i) = irts.read(kryo, input, classOf[IndelRealignmentTarget])
+    })
+    new TargetSet(TreeSet(array: _*)(TargetOrdering))
   }
 }
 
-class ZippedTargetSetSerializer extends Serializer[ZippedTargetSet] {
+private[adam] class IndelRealignmentTargetArraySerializer extends Serializer[Array[IndelRealignmentTarget]] {
 
-  def write(kryo: Kryo, output: Output, obj: ZippedTargetSet) = {
-    kryo.writeClassAndObject(output, obj.set.toList)
+  private val irts = new IndelRealignmentTargetSerializer
+
+  def write(kryo: Kryo, output: Output, obj: Array[IndelRealignmentTarget]) = {
+    output.writeInt(obj.length)
+    obj.foreach(irts.write(kryo, output, _))
   }
 
-  def read(kryo: Kryo, input: Input, klazz: Class[ZippedTargetSet]): ZippedTargetSet = {
-    new ZippedTargetSet(new TreeSet()(ZippedTargetOrdering)
-      .union(kryo.readClassAndObject(input).asInstanceOf[List[(IndelRealignmentTarget, Int)]].toSet))
+  def read(kryo: Kryo, input: Input, klazz: Class[Array[IndelRealignmentTarget]]): Array[IndelRealignmentTarget] = {
+    val arrSize = input.readInt()
+    val arr = new Array[IndelRealignmentTarget](arrSize)
+    (0 until arrSize).foreach(idx => {
+      arr(idx) = irts.read(kryo, input, classOf[IndelRealignmentTarget])
+    })
+    arr
   }
 }
 
-object TargetSet {
+private[realignment] object TargetSet {
   def apply(): TargetSet = {
     new TargetSet(TreeSet[IndelRealignmentTarget]()(TargetOrdering))
   }
 }
 
-// These two case classes are needed to get around some serialization issues
-case class TargetSet(set: TreeSet[IndelRealignmentTarget]) extends Serializable {
-}
-
-case class ZippedTargetSet(set: TreeSet[(IndelRealignmentTarget, Int)]) extends Serializable {
+// this case class is needed to get around some serialization issues (type erasure)
+private[adam] case class TargetSet(set: TreeSet[IndelRealignmentTarget]) extends Serializable {
 }

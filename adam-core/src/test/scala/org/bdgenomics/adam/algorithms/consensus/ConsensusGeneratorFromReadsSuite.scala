@@ -28,8 +28,8 @@ class ConsensusGeneratorFromReadsSuite extends ADAMFunSuite {
   val cg = new ConsensusGeneratorFromReads
 
   def artificial_reads: RDD[AlignmentRecord] = {
-    val path = resourcePath("artificial.sam")
-    sc.loadAlignments(path)
+    val path = testFile("artificial.sam")
+    sc.loadAlignments(path).rdd
   }
 
   sparkTest("checking search for consensus list for artificial reads") {

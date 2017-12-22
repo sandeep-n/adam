@@ -17,57 +17,24 @@
 # limitations under the License.
 #
 
-# Figure out where ADAM is installed
-SCRIPT_DIR="$(cd `dirname $0`/..; pwd)"
+set -e
 
 # does the user have ADAM_OPTS set? if yes, then warn
 if [[ -z $@ && -n "$ADAM_OPTS" ]]; then
-    echo "WARNING: Passing Spark arguments via ADAM_OPTS was recently removed."
-    echo "Run adam-shell instead as adam-shell <spark-args>"
+    echo "WARNING: Passing Spark arguments via ADAM_OPTS was recently removed." 1>&2
+    echo "Run adam-shell instead as adam-shell <spark-args>" 1>&2
 fi
 
-# Find ADAM cli assembly jar
-ADAM_CLI_JAR=
-if [ -d "$SCRIPT_DIR/repo" ]; then
-  ASSEMBLY_DIR="$SCRIPT_DIR/repo"
-else
-  ASSEMBLY_DIR="$SCRIPT_DIR/adam-cli/target"
-fi
+SOURCE_DIR=$(dirname ${BASH_SOURCE[0]})
 
-num_jars="$(ls -1 "$ASSEMBLY_DIR" | grep "^adam-cli_[0-9A-Z\.-]*\.jar$" | wc -l)"
-if [ "$num_jars" -eq "0" ]; then
-  echo "Failed to find ADAM cli assembly in $ASSEMBLY_DIR." 1>&2
-  echo "You need to build ADAM before running this program." 1>&2
-  exit 1
-fi
-ASSEMBLY_JARS="$(ls -1 "$ASSEMBLY_DIR" | grep "^adam-cli_[0-9A-Z\.-]*\.jar$" || true)"
-if [ "$num_jars" -gt "1" ]; then
-  echo "Found multiple ADAM cli assembly jars in $ASSEMBLY_DIR:" 1>&2
-  echo "$ASSEMBLY_JARS" 1>&2
-  echo "Please remove all but one jar." 1>&2
-  exit 1
-fi
+ADAM_CLI_JAR=$(${SOURCE_DIR}/find-adam-assembly.sh)
 
-ADAM_CLI_JAR="${ASSEMBLY_DIR}/${ASSEMBLY_JARS}"
-
-# append ADAM_JARS to the --jars option, if any
-NEW_OPTIONS=$("$SCRIPT_DIR"/bin/append_to_option.py , --jars "$ADAM_CLI_JAR" "$@")
-
-echo "$NEW_OPTIONS"
-
-if [ -z "$SPARK_HOME" ]; then
-  SPARK_SHELL=$(which spark-shell || echo)
-else
-  SPARK_SHELL="$SPARK_HOME"/bin/spark-shell
-fi
-if [ -z "$SPARK_SHELL" ]; then
-  echo "SPARK_HOME not set and spark-shell not on PATH; Aborting."
-  exit 1
-fi
-echo "Using SPARK_SHELL=$SPARK_SHELL"
+SPARK_SHELL=$(${SOURCE_DIR}/find-spark.sh spark-shell)
+echo "Using SPARK_SHELL=$SPARK_SHELL" 1>&2
 
 # submit the job to Spark
 "$SPARK_SHELL" \
-  --conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
-  --conf spark.kryo.registrator=org.bdgenomics.adam.serialization.ADAMKryoRegistrator \
-  $NEW_OPTIONS
+    --conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
+    --conf spark.kryo.registrator=org.bdgenomics.adam.serialization.ADAMKryoRegistrator \
+    --jars ${ADAM_CLI_JAR} \
+    "$@"

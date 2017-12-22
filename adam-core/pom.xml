@@ -4,13 +4,13 @@
   <parent>
     <groupId>org.bdgenomics.adam</groupId>
     <artifactId>adam-parent_2.10</artifactId>
-    <version>0.19.1-SNAPSHOT</version>
+    <version>0.23.0-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
   <artifactId>adam-core_2.10</artifactId>
   <packaging>jar</packaging>
-  <name>ADAM_2.10: Core</name>
+  <name>ADAM_${scala.version.prefix}: Core</name>
   <build>
     <plugins>
       <!-- disable surefire -->
@@ -26,7 +26,7 @@
         <groupId>org.scalatest</groupId>
         <artifactId>scalatest-maven-plugin</artifactId>
         <configuration>
-          <reportsDirectory>${project.build.directory}/surefire-reports</reportsDirectory>
+          <reportsDirectory>${project.build.directory}/scalatest-reports</reportsDirectory>
           <junitxml>.</junitxml>
           <filereports>ADAMTestSuite.txt</filereports>
           <!--
@@ -34,6 +34,7 @@
               The second option allows us better debugging for serialization-based errors.
           -->
           <argLine>-Xmx1024m -Dsun.io.serialization.extendedDebugInfo=true</argLine>
+          <stdout>F</stdout>
         </configuration>
         <executions>
           <execution>
@@ -68,6 +69,7 @@
             <configuration>
               <sources>
                 <source>src/main/scala</source>
+                <source>target/generated-sources/src/main/scala</source>
               </sources>
             </configuration>
           </execution>
@@ -85,104 +87,204 @@
           </execution>
         </executions>
       </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>generate-scala-products</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>java</goal>
+            </goals>
+            <configuration>
+              <mainClass>org.bdgenomics.adam.codegen.DumpSchemasToProduct</mainClass>
+              <arguments>
+                <argument>org.bdgenomics.adam.sql</argument>
+                <argument>org.bdgenomics.formats.avro.AlignmentRecord</argument>
+                <argument>org.bdgenomics.formats.avro.Contig</argument>
+                <argument>org.bdgenomics.formats.avro.Dbxref</argument>
+                <argument>org.bdgenomics.formats.avro.Feature</argument>
+                <argument>org.bdgenomics.formats.avro.Fragment</argument>
+                <argument>org.bdgenomics.formats.avro.Genotype</argument>
+                <argument>org.bdgenomics.formats.avro.NucleotideContigFragment</argument>
+                <argument>org.bdgenomics.formats.avro.OntologyTerm</argument>
+                <argument>org.bdgenomics.formats.avro.ProcessingStep</argument>
+                <argument>org.bdgenomics.formats.avro.TranscriptEffect</argument>
+                <argument>org.bdgenomics.formats.avro.Variant</argument>
+                <argument>org.bdgenomics.formats.avro.VariantAnnotation</argument>
+                <argument>org.bdgenomics.formats.avro.VariantCallingAnnotations</argument>
+                <argument>adam-core/target/generated-sources/src/main/scala/org/bdgenomics/adam/sql/Schemas.scala</argument>
+              </arguments>
+              <classpathScope>compile</classpathScope>
+            </configuration>
+          </execution>
+          <execution>
+            <id>generate-scala-projection-fields</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>java</goal>
+            </goals>
+            <configuration>
+              <mainClass>org.bdgenomics.adam.codegen.DumpSchemasToProjectionEnums</mainClass>
+              <arguments>
+                <argument>org.bdgenomics.adam.projections</argument>
+                <argument>org.bdgenomics.formats.avro.AlignmentRecord</argument>
+                <argument>org.bdgenomics.formats.avro.Contig</argument>
+                <argument>org.bdgenomics.formats.avro.Dbxref</argument>
+                <argument>org.bdgenomics.formats.avro.Feature</argument>
+                <argument>org.bdgenomics.formats.avro.Fragment</argument>
+                <argument>org.bdgenomics.formats.avro.Genotype</argument>
+                <argument>org.bdgenomics.formats.avro.NucleotideContigFragment</argument>
+                <argument>org.bdgenomics.formats.avro.OntologyTerm</argument>
+                <argument>org.bdgenomics.formats.avro.Read</argument>
+                <argument>org.bdgenomics.formats.avro.RecordGroup</argument>
+                <argument>org.bdgenomics.formats.avro.Sample</argument>
+                <argument>org.bdgenomics.formats.avro.Sequence</argument>
+                <argument>org.bdgenomics.formats.avro.Slice</argument>
+                <argument>org.bdgenomics.formats.avro.TranscriptEffect</argument>
+                <argument>org.bdgenomics.formats.avro.Variant</argument>
+                <argument>org.bdgenomics.formats.avro.VariantAnnotation</argument>
+                <argument>org.bdgenomics.formats.avro.VariantCallingAnnotations</argument>
+                <argument>adam-core/target/generated-sources/src/main/scala/org/bdgenomics/adam/projections/Enums.scala</argument>
+              </arguments>
+              <classpathScope>compile</classpathScope>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
 
   <dependencies>
     <dependency>
       <groupId>org.bdgenomics.utils</groupId>
-      <artifactId>utils-misc_2.10</artifactId>
+      <artifactId>utils-misc_${scala.version.prefix}</artifactId>
       <type>test-jar</type>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.bdgenomics.utils</groupId>
-      <artifactId>utils-metrics_2.10</artifactId>
+      <artifactId>utils-misc_${scala.version.prefix}</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>org.bdgenomics.utils</groupId>
-      <artifactId>utils-io_2.10</artifactId>
+      <artifactId>utils-metrics_${scala.version.prefix}</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>org.bdgenomics.utils</groupId>
-      <artifactId>utils-cli_2.10</artifactId>
+      <artifactId>utils-io_${scala.version.prefix}</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.bdgenomics.utils</groupId>
+      <artifactId>utils-cli_${scala.version.prefix}</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.bdgenomics.utils</groupId>
+      <artifactId>utils-intervalrdd_${scala.version.prefix}</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.hammerlab</groupId>
+      <artifactId>genomic-loci_${scala.version.prefix}</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>com.esotericsoftware.kryo</groupId>
       <artifactId>kryo</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.scoverage</groupId>
-      <artifactId>scalac-scoverage-plugin_2.10</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>org.bdgenomics.bdg-formats</groupId>
       <artifactId>bdg-formats</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>commons-io</groupId>
       <artifactId>commons-io</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>org.scala-lang</groupId>
       <artifactId>scala-library</artifactId>
+      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-client</artifactId>
+      <!-- provided scope from parent -->
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-core_2.10</artifactId>
+      <artifactId>spark-core_${scala.version.prefix}</artifactId>
+      <!-- provided scope from parent -->
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_${scala.version.prefix}</artifactId>
     </dependency>
     <dependency>
       <groupId>it.unimi.dsi</groupId>
       <artifactId>fastutil</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.avro</groupId>
       <artifactId>avro</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-log4j12</artifactId>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.parquet</groupId>
       <artifactId>parquet-avro</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.parquet</groupId>
       <artifactId>parquet-scala_2.10</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>org.seqdoop</groupId>
       <artifactId>hadoop-bam</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>com.github.samtools</groupId>
       <artifactId>htsjdk</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>org.scalatest</groupId>
-      <artifactId>scalatest_2.10</artifactId>
+      <artifactId>scalatest_${scala.version.prefix}</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.httpcomponents</groupId>
       <artifactId>httpclient</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.netflix.servo</groupId>
-      <artifactId>servo-core</artifactId>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>org.mockito</groupId>
       <artifactId>mockito-core</artifactId>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>com.google.guava</groupId>
       <artifactId>guava</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.bdgenomics.adam</groupId>
+      <artifactId>adam-codegen_${scala.version.prefix}</artifactId>
     </dependency>
   </dependencies>
   <profiles>
@@ -192,52 +294,9 @@
         <plugins>
           <plugin>
             <groupId>org.scoverage</groupId>
-            <artifactId>maven-scoverage-plugin</artifactId>
-            <version>${scoverage.version}</version>
-            <executions>
-              <execution>
-                <id>test</id>
-                <goals>
-                  <goal>report</goal>
-                </goals>
-              </execution>
-            </executions>
-          </plugin>
-        </plugins>
-      </build>
-    </profile>
-    <profile>
-      <id>default</id>
-      <activation>
-        <activeByDefault>true</activeByDefault>
-      </activation>
-      <build>
-        <plugins>
-          <plugin>
-            <groupId>org.scalatest</groupId>
-            <artifactId>scalatest-maven-plugin</artifactId>
+            <artifactId>scoverage-maven-plugin</artifactId>
             <configuration>
-              <tagsToExclude>org.bdgenomics.adam.util.NetworkConnected,org.bdgenomics.adam.util.S3Test</tagsToExclude>
-            </configuration>
-          </plugin>
-        </plugins>
-      </build>
-    </profile>
-    <profile>
-      <id>network-connected</id>
-      <activation>
-        <property>
-          <name>networkconnected</name>
-        </property>
-      </activation>
-      <build>
-        <plugins>
-          <plugin>
-            <groupId>org.scalatest</groupId>
-            <artifactId>scalatest-maven-plugin</artifactId>
-            <configuration>
-              <tagsToExclude>org.bdgenomics.adam.util.S3Test</tagsToExclude>
-              <tagsToInclude>org.bdgenomics.adam.util.NetworkConnected</tagsToInclude>
+              <excludedPackages>org.bdgenomics.adam.sql</excludedPackages>
             </configuration>
           </plugin>
         </plugins>

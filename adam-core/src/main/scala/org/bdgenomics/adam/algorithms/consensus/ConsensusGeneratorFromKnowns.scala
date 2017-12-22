@@ -24,11 +24,23 @@ import org.bdgenomics.adam.rdd.ADAMContext._
 import org.bdgenomics.adam.rdd.read.realignment.IndelRealignmentTarget
 import org.bdgenomics.adam.rich.RichAlignmentRecord
 import org.bdgenomics.formats.avro.Variant
+import scala.math.max
 import scala.transient
 
-class ConsensusGeneratorFromKnowns(file: String, @transient sc: SparkContext) extends ConsensusGenerator {
+/**
+ * Generates consensus sequences from a set of variants.
+ *
+ * Generates a set of consensus sequences by loading variants and filtering on
+ * INDEL variants. The INDEL variants are mapped directly into consensuses using
+ * their alt allele string as the consensus string.
+ *
+ * @param file Path to file containing variants.
+ * @param sc Spark context to use.
+ */
+private[adam] class ConsensusGeneratorFromKnowns(rdd: RDD[Variant],
+                                                 val flankSize: Int) extends ConsensusGenerator {
 
-  val indelTable = sc.broadcast(IndelTable(file, sc))
+  private val indelTable = rdd.context.broadcast(IndelTable(rdd))
 
   /**
    * Generates targets to add to initial set of indel realignment targets, if additional
@@ -37,16 +49,18 @@ class ConsensusGeneratorFromKnowns(file: String, @transient sc: SparkContext) ex
    * @return Returns an option which wraps an RDD of indel realignment targets.
    */
   def targetsToAdd(): Option[RDD[IndelRealignmentTarget]] = {
-    val rdd: RDD[Variant] = sc.loadVariants(file)
 
     Some(rdd.filter(v => v.getReferenceAllele.length != v.getAlternateAllele.length)
-      .map(v => ReferenceRegion(v.getContig.getContigName, v.getStart, v.getStart + v.getReferenceAllele.length))
-      .map(r => new IndelRealignmentTarget(Some(r), r)))
+      .map(v => ReferenceRegion(v))
+      .map(r => {
+        new IndelRealignmentTarget(Some(r),
+          ReferenceRegion(r.referenceName, max(0L, r.start - flankSize), r.end + flankSize))
+      }))
   }
 
   /**
    * Performs any preprocessing specific to this consensus generation algorithm, e.g.,
-   * indel normalization.
+   * indel normalization. This is a no-op for the knowns model.
    *
    * @param reads Reads to preprocess.
    * @return Preprocessed reads.
@@ -65,16 +79,20 @@ class ConsensusGeneratorFromKnowns(file: String, @transient sc: SparkContext) ex
    * @return Consensus sequences to use for realignment.
    */
   def findConsensus(reads: Iterable[RichAlignmentRecord]): Iterable[Consensus] = {
-    val table = indelTable.value
+    if (reads.isEmpty) {
+      Iterable.empty
+    } else {
+      val table = indelTable.value
 
-    // get region
-    val start = reads.map(_.record.getStart).min
-    val end = reads.map(_.getEnd).max
-    val refId = reads.head.record.getContig.getContigName
+      // get region
+      val start = reads.map(_.record.getStart).min
+      val end = reads.map(_.getEnd).max
+      val refId = reads.head.record.getContigName
 
-    val region = ReferenceRegion(refId, start, end + 1)
+      val region = ReferenceRegion(refId, start, end + 1)
 
-    // get reads
-    table.getIndelsInRegion(region)
+      // get reads
+      table.getIndelsInRegion(region)
+    }
   }
 }

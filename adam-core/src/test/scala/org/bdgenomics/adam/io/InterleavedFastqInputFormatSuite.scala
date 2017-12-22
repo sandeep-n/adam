@@ -22,15 +22,15 @@ import org.apache.spark.rdd.RDD
 import org.apache.hadoop.io.Text
 
 class InterleavedFastqInputFormatSuite extends ADAMFunSuite {
-  (1 to 4) foreach { testNumber =>
+  (1 to 5) foreach { testNumber =>
     val inputName = "interleaved_fastq_sample%d.ifq".format(testNumber)
     val expectedOutputName = inputName + ".output"
-    val expectedOutputPath = ClassLoader.getSystemClassLoader.getResource(expectedOutputName).getFile
+    val expectedOutputPath = testFile(expectedOutputName)
     val expectedOutputData = scala.io.Source.fromFile(expectedOutputPath).mkString
 
     sparkTest("interleaved FASTQ hadoop reader: %s->%s".format(inputName, expectedOutputName)) {
       def ifq_reader: RDD[(Void, Text)] = {
-        val path = ClassLoader.getSystemClassLoader.getResource(inputName).getFile
+        val path = testFile(inputName)
         sc.newAPIHadoopFile(path,
           classOf[InterleavedFastqInputFormat],
           classOf[Void],

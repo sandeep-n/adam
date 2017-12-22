@@ -17,8 +17,6 @@
  */
 package org.bdgenomics.adam.rdd.read
 
-import htsjdk.samtools.SAMFileHeader
-import hbparquet.hadoop.util.ContextUtil
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.mapreduce.{ OutputFormat, RecordWriter, TaskAttemptContext }
 import org.apache.spark.rdd.InstrumentedOutputFormat
@@ -29,63 +27,18 @@ import org.seqdoop.hadoop_bam.{
   SAMRecordWritable
 }
 
-object ADAMBAMOutputFormat extends Serializable {
-
-  private[read] var header: Option[SAMFileHeader] = None
-
-  /**
-   * Attaches a header to the ADAMSAMOutputFormat Hadoop writer. If a header has previously
-   * been attached, the header must be cleared first.
-   *
-   * @throws Exception Exception thrown if a SAM header has previously been attached, and not cleared.
-   *
-   * @param samHeader Header to attach.
-   *
-   * @see clearHeader
-   */
-  def addHeader(samHeader: SAMFileHeader) {
-    assert(header.isEmpty, "Cannot attach a new SAM header without first clearing the header.")
-    header = Some(samHeader)
-  }
-
-  /**
-   * Clears the attached header.
-   *
-   * @see addHeader
-   */
-  def clearHeader() {
-    header = None
-  }
-
-  /**
-   * Returns the current header.
-   *
-   * @return Current SAM header.
-   */
-  private[read] def getHeader: SAMFileHeader = {
-    assert(header.isDefined, "Cannot return header if not attached.")
-    header.get
-  }
-}
-
+/**
+ * Wrapper for Hadoop-BAM to work around requirement for no-args constructor.
+ *
+ * @tparam K The key type. Keys are not written.
+ */
 class ADAMBAMOutputFormat[K]
     extends KeyIgnoringBAMOutputFormat[K] with Serializable {
 
-  setSAMHeader(ADAMBAMOutputFormat.getHeader)
-}
-
-class InstrumentedADAMBAMOutputFormat[K] extends InstrumentedOutputFormat[K, org.seqdoop.hadoop_bam.SAMRecordWritable] {
-  override def timerName(): String = Timers.WriteBAMRecord.timerName
-  override def outputFormatClass(): Class[_ <: OutputFormat[K, SAMRecordWritable]] = classOf[ADAMBAMOutputFormat[K]]
-}
-
-class ADAMBAMOutputFormatHeaderLess[K]
-    extends KeyIgnoringBAMOutputFormat[K] with Serializable {
-
-  setWriteHeader(false)
+  setWriteHeader(true)
 
   override def getRecordWriter(context: TaskAttemptContext): RecordWriter[K, SAMRecordWritable] = {
-    val conf = ContextUtil.getConfiguration(context)
+    val conf = context.getConfiguration()
 
     // where is our header file?
     val path = new Path(conf.get("org.bdgenomics.adam.rdd.read.bam_header_path"))
@@ -94,13 +47,55 @@ class ADAMBAMOutputFormatHeaderLess[K]
     readSAMHeaderFrom(path, conf)
 
     // now that we have the header set, we need to make a record reader
-    return new KeyIgnoringBAMRecordWriter[K](getDefaultWorkFile(context, ""),
+    return new KeyIgnoringBAMRecordWriter[K](getDefaultWorkFile(context, ".bam"),
+      header,
+      true,
+      context)
+  }
+}
+
+/**
+ * Wrapper that adds instrumentation to the BAM output format.
+ *
+ * @tparam K The key type. Keys are not written.
+ */
+class InstrumentedADAMBAMOutputFormat[K] extends InstrumentedOutputFormat[K, org.seqdoop.hadoop_bam.SAMRecordWritable] {
+  override def timerName(): String = Timers.WriteBAMRecord.timerName
+  override def outputFormatClass(): Class[_ <: OutputFormat[K, SAMRecordWritable]] = classOf[ADAMBAMOutputFormat[K]]
+}
+
+/**
+ * Wrapper for Hadoop-BAM to work around requirement for no-args constructor.
+ *
+ * @tparam K The key type. Keys are not written.
+ */
+class ADAMBAMOutputFormatHeaderLess[K]
+    extends KeyIgnoringBAMOutputFormat[K] with Serializable {
+
+  setWriteHeader(false)
+
+  override def getRecordWriter(context: TaskAttemptContext): RecordWriter[K, SAMRecordWritable] = {
+    val conf = context.getConfiguration()
+
+    // where is our header file?
+    val path = new Path(conf.get("org.bdgenomics.adam.rdd.read.bam_header_path"))
+
+    // read the header file
+    readSAMHeaderFrom(path, conf)
+
+    // now that we have the header set, we need to make a record reader
+    return new KeyIgnoringBAMRecordWriter[K](getDefaultWorkFile(context, ".bam"),
       header,
       false,
       context)
   }
 }
 
+/**
+ * Wrapper that adds instrumentation to the SAM output format.
+ *
+ * @tparam K The key type. Keys are not written.
+ */
 class InstrumentedADAMBAMOutputFormatHeaderLess[K] extends InstrumentedOutputFormat[K, org.seqdoop.hadoop_bam.SAMRecordWritable] {
   override def timerName(): String = Timers.WriteBAMRecord.timerName
   override def outputFormatClass(): Class[_ <: OutputFormat[K, SAMRecordWritable]] = classOf[ADAMBAMOutputFormatHeaderLess[K]]

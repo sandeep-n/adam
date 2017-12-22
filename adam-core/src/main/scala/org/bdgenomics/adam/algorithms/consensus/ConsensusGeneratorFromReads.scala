@@ -18,17 +18,21 @@
 package org.bdgenomics.adam.algorithms.consensus
 
 import org.apache.spark.rdd.RDD
-import org.bdgenomics.adam.models.{ Consensus, ReferenceRegion, ReferencePosition }
+import org.bdgenomics.adam.models.{ MdTag, ReferencePosition, ReferenceRegion }
 import org.bdgenomics.adam.rdd.read.realignment.IndelRealignmentTarget
-import org.bdgenomics.adam.rich.RichAlignmentRecord
 import org.bdgenomics.adam.rich.RichAlignmentRecord._
-import org.bdgenomics.adam.rich.RichCigar._
-import org.bdgenomics.adam.util.MdTag
-import org.bdgenomics.adam.util.ImplicitJavaConversions._
-import org.bdgenomics.adam.util.NormalizationUtils._
+import org.bdgenomics.adam.rich.RichAlignmentRecord
 import org.bdgenomics.formats.avro.AlignmentRecord
 
-class ConsensusGeneratorFromReads extends ConsensusGenerator {
+/**
+ * Consensus generator that examines the read alignments.
+ *
+ * This consensus generation method preprocesses the reads by left normalizing
+ * all INDELs seen in the reads, and then generates consensus sequences from
+ * reads whose local alignments contain INDELs. These consensuses are deduped
+ * before they are returned.
+ */
+private[adam] class ConsensusGeneratorFromReads extends ConsensusGenerator {
 
   /**
    * No targets to add if generating consensus targets from reads.
@@ -50,9 +54,9 @@ class ConsensusGeneratorFromReads extends ConsensusGenerator {
     region: ReferenceRegion): Iterable[RichAlignmentRecord] = {
     reads.map(r => {
       // if there are two alignment blocks (sequence matches) then there is a single indel in the read
-      if (r.samtoolsCigar.numAlignmentBlocks == 2) {
+      if (numAlignmentBlocks(r.samtoolsCigar) == 2) {
         // left align this indel and update the mdtag
-        val cigar = leftAlignIndel(r)
+        val cigar = NormalizationUtils.leftAlignIndel(r)
         val mdTag = MdTag.moveAlignment(r, cigar)
 
         val newRead: RichAlignmentRecord = AlignmentRecord.newBuilder(r)
@@ -68,7 +72,16 @@ class ConsensusGeneratorFromReads extends ConsensusGenerator {
   }
 
   /**
-   * Generates concensus sequences from reads with indels.
+   * Generates consensus sequences from reads with INDELs.
+   *
+   * Loops over provided reads. Filters all reads without an MD tag, and then
+   * generates consensus sequences. If a read contains a single INDEL aligned to
+   * the reference, we emit that INDEL. Else, we do not emit a consensus from
+   * the read. We dedup the consensuses to remove any INDELs observed in
+   * multiple reads and return.
+   *
+   * @param Reads to search for INDELs.
+   * @return Consensuses generated from reads with a singel INDEL
    */
   def findConsensus(reads: Iterable[RichAlignmentRecord]): Iterable[Consensus] = {
     reads.filter(r => r.mdTag.isDefined)
@@ -78,7 +91,7 @@ class ConsensusGeneratorFromReads extends ConsensusGenerator {
         Consensus.generateAlternateConsensus(
           r.getSequence,
           ReferencePosition(
-            r.getContig.getContigName,
+            r.getContigName,
             r.getStart
           ),
           r.samtoolsCigar
@@ -87,5 +100,4 @@ class ConsensusGeneratorFromReads extends ConsensusGenerator {
       .toSeq
       .distinct
   }
-
 }

@@ -24,12 +24,18 @@ import org.bdgenomics.adam.models.{ TagType, Attribute }
 /**
  * AttributeUtils is a utility object for parsing optional fields from a BAM file, or
  * the attributes column from an ADAM file.
- *
  */
 object AttributeUtils {
 
-  val attrRegex = RegExp("([^:]{2,4}):([AifZHB]):([cCiIsSf]{1},)?(.*)")
+  val attrRegex = """([^:]{2,4}):([AifZHB]):(.*)""".r
+  val arrayRegex = """([cCiIsSf]{1},)(.*)""".r
 
+  /**
+   * Converts an htsjdk SAM Tag/Value into an ADAM attribute.
+   *
+   * @param attr htsjdk tag/value pair containing a tag value with a known type.
+   * @return Returns an Attribute instance.
+   */
   def convertSAMTagAndValue(attr: SAMTagAndValue): Attribute = {
     if (attr.value.isInstanceOf[TagValueAndUnsignedArrayFlag]) {
       attr.value.asInstanceOf[TagValueAndUnsignedArrayFlag].value match {
@@ -54,6 +60,7 @@ object AttributeUtils {
 
   /**
    * Parses a tab-separated string of attributes (tag:type:value) into a Seq of Attribute values.
+   *
    * @param tagStrings The String to be parsed
    * @return The parsed Attributes
    */
@@ -70,8 +77,8 @@ object AttributeUtils {
    *         expression ([A-Z]{2}:[AifZHB]:[^\t^]+)
    */
   def parseAttribute(encoded: String): Attribute = {
-    attrRegex.matches(encoded) match {
-      case Some(m) => createAttribute((m.group(1), m.group(2), m.group(3), m.group(4)))
+    attrRegex.findFirstMatchIn(encoded) match {
+      case Some(m) => createAttribute((m.group(1), m.group(2), m.group(3)))
       case None =>
         throw new IllegalArgumentException(
           "attribute string \"%s\" doesn't match format attrTuple:type:value".format(encoded)
@@ -79,13 +86,23 @@ object AttributeUtils {
     }
   }
 
-  private def createAttribute(attrTuple: (String, String, String, String)): Attribute = {
+  private def createAttribute(attrTuple: (String, String, String)): Attribute = {
     val tagName = attrTuple._1
     val tagTypeString = attrTuple._2
-    val tagArrayString: Option[String] = Option(attrTuple._3)
-    val valueStr = attrTuple._4
 
-    val fullTagString = tagArrayString.fold(tagTypeString)(arrayString => "%s:%s".format(tagTypeString, arrayString))
+    val (fullTagString, valueStr) = if (tagTypeString == "B") {
+      arrayRegex.findFirstMatchIn(attrTuple._3) match {
+        case Some(m) => {
+          ("%s:%s".format(tagTypeString, m.group(1)), m.group(2))
+        }
+        case None => {
+          throw new IllegalArgumentException(
+            "Array tags must define array format. For tag %s.".format(attrTuple))
+        }
+      }
+    } else {
+      (tagTypeString, attrTuple._3)
+    }
 
     // partial match, but these letters should be (per the SAM file format spec)
     // the only legal values of the tagTypeString anyway.

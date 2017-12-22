@@ -18,7 +18,8 @@
 package org.bdgenomics.adam.rdd
 
 import org.bdgenomics.adam.models.{ ReferenceRegion, ReferencePosition, SequenceDictionary }
-import org.apache.spark.{ Logging, Partitioner }
+import org.bdgenomics.utils.misc.Logging
+import org.apache.spark.Partitioner
 import scala.math._
 
 /**
@@ -40,15 +41,15 @@ case class GenomicPositionPartitioner(numParts: Int, seqLengths: Map[String, Lon
   log.info("Have genomic position partitioner with " + numParts + " partitions, and sequences:")
   seqLengths.foreach(kv => log.info("Contig " + kv._1 + " with length " + kv._2))
 
-  val names: Seq[String] = seqLengths.keys.toSeq.sortWith(_ < _)
-  val lengths: Seq[Long] = names.map(seqLengths(_))
+  private val names: Seq[String] = seqLengths.keys.toSeq.sortWith(_ < _)
+  private val lengths: Seq[Long] = names.map(seqLengths(_))
   private val cumuls: Seq[Long] = lengths.scan(0L)(_ + _)
 
   // total # of bases in the sequence dictionary
-  val totalLength: Long = lengths.sum
+  private val totalLength: Long = lengths.sum
 
   // referenceName -> cumulative length before this sequence (using seqDict.records as the implicit ordering)
-  val cumulativeLengths: Map[String, Long] = Map(
+  private[rdd] val cumulativeLengths: Map[String, Long] = Map(
     names.zip(cumuls): _*
   )
 
@@ -56,16 +57,40 @@ case class GenomicPositionPartitioner(numParts: Int, seqLengths: Map[String, Lon
    * 'parts' is the total number of partitions for non-UNMAPPED ReferencePositions --
    * the total number of partitions (see numPartitions, below) is parts+1, with the
    * extra partition being included for handling ReferencePosition.UNMAPPED
+   *
+   * @see numPartitions
    */
   private val parts = min(numParts, totalLength).toInt
 
+  /**
+   * This is the total number of partitions for both mapped and unmapped
+   * positions. All unmapped positions go into the last partition.
+   *
+   * @see parts
+   */
   override def numPartitions: Int = parts + 1
 
+  /**
+   * Computes the partition for a key.
+   *
+   * @param key A key to compute the partition for.
+   * @return The partition that this key belongs to.
+   *
+   * @throws IllegalArgumentException if the key is not a ReferencePosition, or
+   *   (ReferencePosition, _) tuple.
+   */
   override def getPartition(key: Any): Int = {
 
     // This allows partitions that cross chromosome boundaries.
     // The computation is slightly more complicated if you want to avoid this.
     def getPart(referenceName: String, pos: Long): Int = {
+      require(
+        seqLengths.contains(referenceName),
+        "Received key (%s) that did not map to a known contig. Contigs are:\n%s".format(
+          referenceName,
+          seqLengths.keys.mkString("\n")
+        )
+      )
       val totalOffset = cumulativeLengths(referenceName) + pos
       val totalFraction: Double = totalOffset.toDouble / totalLength
       // Need to use 'parts' here, rather than 'numPartitions' -- see the note
@@ -79,13 +104,9 @@ case class GenomicPositionPartitioner(numParts: Int, seqLengths: Map[String, Lon
 
       // everything else gets assigned normally.
       case refpos: ReferencePosition => {
-        require(
-          seqLengths.contains(refpos.referenceName),
-          "Received key (%s) that did not map to a known contig. Contigs are:\n%s".format(
-            refpos,
-            seqLengths.keys.mkString("\n")
-          )
-        )
+        getPart(refpos.referenceName, refpos.pos)
+      }
+      case (refpos: ReferencePosition, k: Any) => {
         getPart(refpos.referenceName, refpos.pos)
       }
 
@@ -97,9 +118,11 @@ case class GenomicPositionPartitioner(numParts: Int, seqLengths: Map[String, Lon
   override def toString(): String = {
     return "%d parts, %d partitions, %s" format (parts, numPartitions, cumulativeLengths.toString)
   }
-
 }
 
+/**
+ * Helper for creating genomic position partitioners.
+ */
 object GenomicPositionPartitioner {
 
   /**
@@ -116,29 +139,53 @@ object GenomicPositionPartitioner {
     seqDict.records.toSeq.map(rec => (rec.name, rec.length)).toMap
 }
 
-case class GenomicRegionPartitioner(partitionSize: Long, seqLengths: Map[String, Long], start: Boolean = true) extends Partitioner with Logging {
+/**
+ * A partitioner for ReferenceRegion-keyed data.
+ *
+ * @param partitionSize The number of bases per partition.
+ * @param seqLengths A map between contig names and contig lengths.
+ * @param start If true, use the start position (instead of the end position) to
+ *   decide which partition a key belongs to.
+ */
+case class GenomicRegionPartitioner(partitionSize: Long,
+                                    seqLengths: Map[String, Long],
+                                    start: Boolean = true) extends Partitioner with Logging {
   private val names: Seq[String] = seqLengths.keys.toSeq.sortWith(_ < _)
   private val lengths: Seq[Long] = names.map(seqLengths(_))
   private val parts: Seq[Int] = lengths.map(v => round(ceil(v.toDouble / partitionSize)).toInt)
   private val cumulParts: Map[String, Int] = Map(names.zip(parts.scan(0)(_ + _)): _*)
 
   private def computePartition(refReg: ReferenceRegion): Int = {
+    require(
+      seqLengths.contains(refReg.referenceName),
+      "Received key (%s) that did not map to a known contig. Contigs are:\n%s".format(
+        refReg.referenceName,
+        seqLengths.keys.mkString("\n")
+      )
+    )
     val pos = if (start) refReg.start else (refReg.end - 1)
     (cumulParts(refReg.referenceName) + pos / partitionSize).toInt
   }
 
+  /**
+   * @return The number of partitions described by this partitioner. Roughly the
+   *   size of the genome divided by the partition length.
+   */
   override def numPartitions: Int = parts.sum
 
+  /**
+   * @param key The key to get the partition index for.
+   * @return The partition that a key should map to.
+   *
+   * @throws IllegalArgumentException Throws an exception if the data is not a
+   *   ReferenceRegion or a tuple of (ReferenceRegion, _).
+   */
   override def getPartition(key: Any): Int = {
     key match {
       case region: ReferenceRegion => {
-        require(
-          seqLengths.contains(region.referenceName),
-          "Received key (%s) that did not map to a known contig. Contigs are:\n%s".format(
-            region,
-            seqLengths.keys.mkString("\n")
-          )
-        )
+        computePartition(region)
+      }
+      case (region: ReferenceRegion, k: Any) => {
         computePartition(region)
       }
       case _ => throw new IllegalArgumentException("Only ReferenceMappable values can be partitioned by GenomicRegionPartitioner")
@@ -146,6 +193,9 @@ case class GenomicRegionPartitioner(partitionSize: Long, seqLengths: Map[String,
   }
 }
 
+/**
+ * Helper object for creating GenomicRegionPartitioners.
+ */
 object GenomicRegionPartitioner {
 
   /**

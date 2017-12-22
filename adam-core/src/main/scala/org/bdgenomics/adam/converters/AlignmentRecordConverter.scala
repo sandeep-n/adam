@@ -24,25 +24,32 @@ import org.bdgenomics.adam.rich.RichAlignmentRecord
 import org.bdgenomics.formats.avro.{ AlignmentRecord, Fragment }
 import scala.collection.JavaConversions._
 
+/**
+ * This class contains methods to convert AlignmentRecords to other formats.
+ */
 class AlignmentRecordConverter extends Serializable {
 
   /**
-   * Converts a single record to FASTQ. FASTQ format is:
+   * Prepare a single record for conversion to FASTQ and similar formats by
+   * splitting into a tuple of (name, sequence, qualityScores).
    *
-   * {{{
-   * @readName
-   * sequence
-   * +<optional readname>
-   * ASCII quality scores
-   * }}}
+   * If the base qualities are unknown (qual is null or equals "*"), the quality
+   * scores will be a repeated string of 'B's that is equal to the read length.
    *
-   * @param adamRecord Read to convert to FASTQ.
-   * @return Returns this read in string form.
+   * @param adamRecord Read to prepare for conversion to FASTQ and similar formats.
+   * @param maybeAddSuffix If true, check if a "/%d" suffix is attached to the
+   *   read. If there is no suffix, a slash and the number of the read in the
+   *   sequenced fragment is appended to the readname. Default is false.
+   * @param outputOriginalBaseQualities If true and the original base quality
+   *   field is set (SAM "OQ" tag), outputs the original qualities. Else,
+   *   output the qual field. Defaults to false.
+   * @return Returns tuple of (name, sequence, qualityScores).
    */
-  def convertToFastq(
+  private def prepareFastq(
     adamRecord: AlignmentRecord,
-    maybeAddSuffix: Boolean = false,
-    outputOriginalBaseQualities: Boolean = false): String = {
+    maybeAddSuffix: Boolean,
+    outputOriginalBaseQualities: Boolean): (String, String, String) = {
+
     val readNameSuffix =
       if (maybeAddSuffix &&
         !AlignmentRecordConverter.readNameHasPairedSuffix(adamRecord) &&
@@ -72,14 +79,13 @@ class AlignmentRecordConverter extends Serializable {
       else
         adamRecord.getQual
 
-    "@%s%s\n%s\n+\n%s".format(
-      adamRecord.getReadName,
-      readNameSuffix,
-      if (adamRecord.getReadMapped && adamRecord.getReadNegativeStrand)
+    (
+      adamRecord.getReadName + readNameSuffix,
+      if (adamRecord.getReadNegativeStrand)
         Alphabet.dna.reverseComplement(adamRecord.getSequence)
       else
         adamRecord.getSequence,
-      if (adamRecord.getReadMapped && adamRecord.getReadNegativeStrand)
+      if (adamRecord.getReadNegativeStrand)
         qualityScores.reverse
       else
         qualityScores
@@ -87,11 +93,144 @@ class AlignmentRecordConverter extends Serializable {
   }
 
   /**
+   * Converts a single record to FASTQ format.
+   *
+   * FASTQ format is:
+   * {{{
+   * @readName
+   * sequence
+   * +<optional readname>
+   * ASCII quality scores
+   * }}}
+   *
+   * If the base qualities are unknown (qual is null or equals "*"), the quality
+   * scores will be a repeated string of 'B's that is equal to the read length.
+   *
+   * @param adamRecord Read to convert to FASTQ.
+   * @param maybeAddSuffix If true, check if a "/%d" suffix is attached to the
+   *   read. If there is no suffix, a slash and the number of the read in the
+   *   sequenced fragment is appended to the readname. Default is false.
+   * @param outputOriginalBaseQualities If true and the original base quality
+   *   field is set (SAM "OQ" tag), outputs the original qualities. Else,
+   *   output the qual field. Defaults to false.
+   * @return Returns this read in string form.
+   */
+  def convertToFastq(
+    adamRecord: AlignmentRecord,
+    maybeAddSuffix: Boolean = false,
+    outputOriginalBaseQualities: Boolean = false): String = {
+
+    val (name, sequence, qualityScores) =
+      prepareFastq(adamRecord, maybeAddSuffix, outputOriginalBaseQualities)
+
+    "@%s\n%s\n+\n%s".format(name, sequence, qualityScores)
+  }
+
+  /**
+   * Converts a single record to Bowtie tab6 format.
+   *
+   * In Bowtie tab6 format, each alignment record or pair is on a single line.
+   * An unpaired alignment record line is [name]\t[seq]\t[qual]\n.
+   * For paired-end alignment records, the second end can have a different name
+   * from the first: [name1]\t[seq1]\t[qual1]\t[name2]\t[seq2]\t[qual2]\n.
+   *
+   * If the base qualities are unknown (qual is null or equals "*"), the quality
+   * scores will be a repeated string of 'B's that is equal to the read length.
+   *
+   * @param adamRecord Read to convert to FASTQ.
+   * @param maybeAddSuffix If true, check if a "/%d" suffix is attached to the
+   *   read. If there is no suffix, a slash and the number of the read in the
+   *   sequenced fragment is appended to the readname. Default is false.
+   * @param outputOriginalBaseQualities If true and the original base quality
+   *   field is set (SAM "OQ" tag), outputs the original qualities. Else,
+   *   output the qual field. Defaults to false.
+   * @return Returns this read in string form.
+   */
+  def convertToTab6(
+    adamRecord: AlignmentRecord,
+    maybeAddSuffix: Boolean = false,
+    outputOriginalBaseQualities: Boolean = false): String = {
+
+    val (name, sequence, qualityScores) =
+      prepareFastq(adamRecord, maybeAddSuffix, outputOriginalBaseQualities)
+
+    "%s\t%s\t%s".format(name, sequence, qualityScores)
+  }
+
+  /**
+   * Converts a single record to Bowtie tab5 format.
+   *
+   * In Bowtie tab5 format, each alignment record or pair is on a single line.
+   * An unpaired alignment record line is [name]\t[seq]\t[qual]\n.
+   * A paired-end read line is [name]\t[seq1]\t[qual1]\t[seq2]\t[qual2]\n.
+   *
+   * The index suffix will be trimmed from the read name if present.
+   *
+   * If the base qualities are unknown (qual is null or equals "*"), the quality
+   * scores will be a repeated string of 'B's that is equal to the read length.
+   *
+   * @param adamRecord Read to convert to FASTQ.
+   * @param outputOriginalBaseQualities If true and the original base quality
+   *   field is set (SAM "OQ" tag), outputs the original qualities. Else,
+   *   output the qual field. Defaults to false.
+   * @return Returns this read in string form.
+   */
+  def convertToTab5(
+    adamRecord: AlignmentRecord,
+    outputOriginalBaseQualities: Boolean = false): String = {
+
+    val (name, sequence, qualityScores) =
+      prepareFastq(adamRecord, maybeAddSuffix = false, outputOriginalBaseQualities)
+
+    "%s\t%s\t%s".format(trimSuffix(name), sequence, qualityScores)
+  }
+
+  /**
+   * Converts a single record representing the second read of a pair to Bowtie
+   * tab5 format.
+   *
+   * In Bowtie tab5 format, each alignment record or pair is on a single line.
+   * An unpaired alignment record line is [name]\t[seq]\t[qual]\n.
+   * A paired-end read line is [name]\t[seq1]\t[qual1]\t[seq2]\t[qual2]\n.
+   *
+   * If the base qualities are unknown (qual is null or equals "*"), the quality
+   * scores will be a repeated string of 'B's that is equal to the read length.
+   *
+   * @param adamRecord Read to convert to FASTQ.
+   * @param outputOriginalBaseQualities If true and the original base quality
+   *   field is set (SAM "OQ" tag), outputs the original qualities. Else,
+   *   output the qual field. Defaults to false.
+   * @return Returns this read in string form.
+   */
+  def convertSecondReadToTab5(
+    adamRecord: AlignmentRecord,
+    outputOriginalBaseQualities: Boolean = false): String = {
+
+    val (name, sequence, qualityScores) =
+      prepareFastq(adamRecord, maybeAddSuffix = false, outputOriginalBaseQualities)
+
+    // name of second read is ignored
+    "%s\t%s".format(sequence, qualityScores)
+  }
+
+  /**
+   * Trim the index suffix from the read name if present.
+   *
+   * @param name Read name to trim.
+   * @return The read name after trimming the index suffix if present.
+   */
+  private def trimSuffix(name: String): String = {
+    name.replace("/[0-9]+^", "")
+  }
+
+  /**
    * Converts a single ADAM record into a SAM record.
    *
    * @param adamRecord ADAM formatted alignment record to convert.
-   * @param header SAM file header to use.
-   * @return Returns the record converted to SAMtools format. Can be used for output to SAM/BAM.
+   * @param header SAM file header to attach to the record.
+   * @param rgd Dictionary describing the read groups that are in the RDD that
+   *   this read is from.
+   * @return Returns the record converted to htsjdk format. Can be used for output to SAM/BAM.
    */
   def convert(adamRecord: AlignmentRecord,
               header: SAMFileHeaderWritable,
@@ -111,15 +250,14 @@ class AlignmentRecordConverter extends Serializable {
     // set read group flags
     Option(adamRecord.getRecordGroupName)
       .foreach(v => {
-        builder.setAttribute("RG", rgd.getIndex(v))
+        builder.setAttribute("RG", v)
         val rg = rgd(v)
         rg.library.foreach(v => builder.setAttribute("LB", v))
         rg.platformUnit.foreach(v => builder.setAttribute("PU", v))
       })
 
     // set the reference name, and alignment position, for mate
-    Option(adamRecord.getMateContig)
-      .map(_.getContigName)
+    Option(adamRecord.getMateContigName)
       .foreach(builder.setMateReferenceName)
     Option(adamRecord.getMateAlignmentStart)
       .foreach(s => builder.setMateAlignmentStart(s.toInt + 1))
@@ -155,8 +293,8 @@ class AlignmentRecordConverter extends Serializable {
         // only set alignment flags if read is aligned
         if (m) {
           // if we are aligned, we must have a reference
-          assert(adamRecord.getContig != null, "Cannot have null contig if aligned.")
-          builder.setReferenceName(adamRecord.getContig.getContigName)
+          require(adamRecord.getContigName != null, "Cannot have null contig if aligned.")
+          builder.setReferenceName(adamRecord.getContigName)
 
           // set the cigar, if provided
           Option(adamRecord.getCigar).foreach(builder.setCigarString)
@@ -183,6 +321,13 @@ class AlignmentRecordConverter extends Serializable {
       .foreach(v => builder.setReadFailsVendorQualityCheckFlag(v.booleanValue))
     Option(adamRecord.getMismatchingPositions)
       .foreach(builder.setAttribute("MD", _))
+    Option(adamRecord.getOrigQual)
+      .map(s => s.getBytes.map(v => (v - 33).toByte)) // not ascii, but short int
+      .foreach(builder.setOriginalBaseQualities(_))
+    Option(adamRecord.getOldCigar)
+      .foreach(builder.setAttribute("OC", _))
+    Option(adamRecord.getOldPosition)
+      .foreach(i => builder.setAttribute("OP", i + 1))
 
     // add all other tags
     if (adamRecord.getAttributes != null) {
@@ -203,7 +348,8 @@ class AlignmentRecordConverter extends Serializable {
    * @param rgd Dictionary containing record groups.
    * @return Converted SAM formatted record.
    */
-  def createSAMHeader(sd: SequenceDictionary, rgd: RecordGroupDictionary): SAMFileHeader = {
+  def createSAMHeader(sd: SequenceDictionary,
+                      rgd: RecordGroupDictionary): SAMFileHeader = {
     val samSequenceDictionary = sd.toSAMSequenceDictionary
     val samHeader = new SAMFileHeader
     samHeader.setSequenceDictionary(samSequenceDictionary)
@@ -225,13 +371,29 @@ class AlignmentRecordConverter extends Serializable {
   }
 }
 
-object AlignmentRecordConverter {
+/**
+ * Singleton object to assist with converting AlignmentRecords.
+ *
+ * Singleton object exists due to cross reference from
+ * org.bdgenomics.adam.rdd.read.AlignmentRecordRDDFunctions.
+ */
+private[adam] object AlignmentRecordConverter extends Serializable {
 
+  /**
+   * Checks to see if a read name has a index suffix.
+   *
+   * Read names frequently end in a "/%d" suffix, where the digit at the end
+   * signifies the number of this read in the sequenced fragment. E.g., for an
+   * Illumina paired-end protocol, the first read in the pair will have a "/1"
+   * suffix, while the second read in the pair will have a "/2" suffix.
+   *
+   * @param adamRecord Record to check.
+   * @return True if the read ends in a read number suffix.
+   */
   def readNameHasPairedSuffix(adamRecord: AlignmentRecord): Boolean = {
     adamRecord.getReadName.length() > 2 &&
       adamRecord.getReadName.charAt(adamRecord.getReadName.length() - 2) == '/' &&
       (adamRecord.getReadName.charAt(adamRecord.getReadName.length() - 1) == '1' ||
         adamRecord.getReadName.charAt(adamRecord.getReadName.length() - 1) == '2')
   }
-
 }

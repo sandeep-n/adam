@@ -17,86 +17,185 @@
  */
 package org.bdgenomics.adam.models
 
-import org.bdgenomics.adam.rich.RichVariant
-import org.bdgenomics.adam.rich.DecadentRead._
-import org.apache.spark.Logging
+import com.esotericsoftware.kryo.io.{ Input, Output }
+import com.esotericsoftware.kryo.{ Kryo, Serializer }
+import org.apache.spark.rdd.MetricsContext._
 import org.apache.spark.rdd.RDD
-import scala.collection.immutable._
-import scala.collection.mutable
-import java.io.File
+import org.bdgenomics.adam.instrumentation.Timers._
+import org.bdgenomics.adam.rdd.variant.VariantRDD
+import org.bdgenomics.utils.misc.Logging
+import scala.annotation.tailrec
+import scala.math.{ max, min }
 
-class SnpTable(private val table: Map[String, Set[Long]]) extends Serializable with Logging {
-  log.info("SNP table has %s contigs and %s entries".format(table.size, table.values.map(_.size).sum))
+/**
+ * A table containing all of the SNPs in a known variation dataset.
+ *
+ * @param indices A map of contig names to the (first, last) index in the
+ *   site array that contain data from this contig.
+ * @param sites An array containing positions that have masked SNPs. Sorted by
+ *   contig name and then position.
+ */
+class SnpTable private[models] (
+    private[models] val indices: Map[String, (Int, Int)],
+    private[models] val sites: Array[Long]) extends Serializable with Logging {
+
+  private val midpoints: Map[String, Int] = {
+    @tailrec def pow2ceil(length: Int, i: Int = 1): Int = {
+      if (2 * i >= length) {
+        i
+      } else {
+        pow2ceil(length, 2 * i)
+      }
+    }
+
+    indices.mapValues(p => {
+      val (start, end) = p
+      pow2ceil(end - start + 1)
+    })
+  }
+
+  @tailrec private def binarySearch(rr: ReferenceRegion,
+                                    offset: Int,
+                                    length: Int,
+                                    step: Int,
+                                    idx: Int = 0): Option[Int] = {
+    if (length == 0) {
+      None
+    } else if (rr.start <= sites(offset + idx) && rr.end > sites(offset + idx)) {
+      // if we've satistfied this last condition, then the read is overlapping the
+      // current index and we have a hit
+      Some(offset + idx)
+    } else if (step == 0) {
+      None
+    } else {
+      val stepIdx = idx + step
+      val nextIdx: Int = if (stepIdx >= length ||
+        rr.end <= sites(offset + stepIdx)) {
+        idx
+      } else {
+        stepIdx
+      }
+      binarySearch(rr, offset, length, step / 2, nextIdx)
+    }
+  }
+
+  @tailrec private def extendForward(rr: ReferenceRegion,
+                                     offset: Int,
+                                     idx: Int,
+                                     list: List[Long] = List.empty): List[Long] = {
+    if (idx < offset) {
+      list
+    } else {
+      if (rr.start > sites(idx)) {
+        list
+      } else {
+        extendForward(rr, offset, idx - 1, sites(idx) :: list)
+      }
+    }
+  }
+
+  @tailrec private def extendBackwards(rr: ReferenceRegion,
+                                       end: Int,
+                                       idx: Int,
+                                       list: List[Long]): Set[Long] = {
+    if (idx > end) {
+      list.toSet
+    } else {
+      if (rr.end <= sites(idx)) {
+        list.toSet
+      } else {
+        extendBackwards(rr, end, idx + 1, sites(idx) :: list)
+      }
+    }
+  }
 
   /**
    * Is there a known SNP at the reference location of this Residue?
    */
-  def isMasked(residue: Residue): Boolean =
-    contains(residue.referencePosition)
+  private[adam] def maskedSites(rr: ReferenceRegion): Set[Long] = CheckingForMask.time {
+    val optRange = indices.get(rr.referenceName)
 
-  /**
-   * Is there a known SNP at the given reference location?
-   */
-  def contains(location: ReferencePosition): Boolean = {
-    val bucket = table.get(location.referenceName)
-    if (bucket.isEmpty) unknownContigWarning(location.referenceName)
-    bucket.map(_.contains(location.pos)).getOrElse(false)
-  }
+    optRange.flatMap(range => {
+      val (offset, end) = range
+      val optIdx = binarySearch(rr, offset, end - offset + 1, midpoints(rr.referenceName))
 
-  private val unknownContigs = new mutable.HashSet[String]
-
-  private def unknownContigWarning(contig: String) = {
-    // This is synchronized to avoid a data race. Multiple threads may
-    // race to update `unknownContigs`, e.g. when running with a Spark
-    // master of `local[N]`.
-    synchronized {
-      if (!unknownContigs.contains(contig)) {
-        unknownContigs += contig
-        log.warn("Contig has no entries in known SNPs table: %s".format(contig))
-      }
-    }
+      optIdx.map(idx => {
+        extendBackwards(rr, end, idx + 1, extendForward(rr, offset, idx))
+          .map(_.toLong)
+      })
+    }).getOrElse(Set.empty)
   }
 }
 
+/**
+ * Companion object with helper functions for building SNP tables.
+ */
 object SnpTable {
+
+  /**
+   * Creates an empty SNP Table.
+   *
+   * @return An empty SNP table.
+   */
   def apply(): SnpTable = {
-    new SnpTable(Map[String, Set[Long]]())
+    new SnpTable(Map.empty,
+      Array.empty)
   }
 
-  // `knownSnpsFile` is expected to be a sites-only VCF
-  def apply(knownSnpsFile: File): SnpTable = {
-    // parse into tuples of (contig, position)
-    val snpsSource = scala.io.Source.fromFile(knownSnpsFile)
-    try {
-      val lines = snpsSource.getLines()
-      val tuples = lines.filter(line => !line.startsWith("#")).flatMap(line => {
-        val split = line.split("\t")
-        val contig = split(0)
-        val pos = split(1).toLong - 1
-        val ref = split(3)
-        assert(pos >= 0)
-        assert(!ref.isEmpty)
-        ref.zipWithIndex.map {
-          case (base, idx) =>
-            assert(Seq('A', 'C', 'T', 'G', 'N').contains(base))
-            (contig, pos + idx)
-        }
-      })
-      // construct map from contig to set of positions
-      // this is done in-place to reduce overhead
-      val table = new mutable.HashMap[String, mutable.HashSet[Long]]
-      tuples.foreach(tup => table.getOrElseUpdate(tup._1, { new mutable.HashSet[Long] }) += tup._2)
-      // construct SnpTable from immutable copy of `table`
-      new SnpTable(table.mapValues(_.toSet).toMap)
-    } finally {
-      snpsSource.close()
+  /**
+   * Creates a SNP Table from a VariantRDD.
+   *
+   * @param variants The variants to populate the table from.
+   * @return Returns a new SNPTable containing the input variants.
+   */
+  def apply(variants: VariantRDD): SnpTable = CreatingKnownSnpsTable.time {
+    val (indices, positions) = CollectingSnps.time {
+      val sortedVariants = variants.sort()
+        .rdd
+        .cache()
+
+      val contigIndices = sortedVariants.map(_.getContigName)
+        .zipWithIndex
+        .mapValues(v => (v.toInt, v.toInt))
+        .reduceByKeyLocally((p1, p2) => {
+          (min(p1._1, p2._1), max(p1._2, p2._2))
+        }).toMap
+      val sites = sortedVariants.map(_.getStart: Long).collect()
+
+      // unpersist the cached variants
+      sortedVariants.unpersist()
+
+      (contigIndices, sites)
     }
+    new SnpTable(indices, positions)
+  }
+}
+
+private[adam] class SnpTableSerializer extends Serializer[SnpTable] {
+
+  def write(kryo: Kryo, output: Output, obj: SnpTable) {
+    output.writeInt(obj.indices.size)
+    obj.indices.foreach(kv => {
+      val (contigName, (lowerBound, upperBound)) = kv
+      output.writeString(contigName)
+      output.writeInt(lowerBound)
+      output.writeInt(upperBound)
+    })
+    output.writeInt(obj.sites.length)
+    obj.sites.foreach(output.writeLong(_))
   }
 
-  def apply(variants: RDD[RichVariant]): SnpTable = {
-    val positions = variants.map(variant => (variant.getContig.getContigName, variant.getStart)).collect()
-    val table = new mutable.HashMap[String, mutable.HashSet[Long]]
-    positions.foreach(tup => table.getOrElseUpdate(tup._1, { new mutable.HashSet[Long] }) += tup._2)
-    new SnpTable(table.mapValues(_.toSet).toMap)
+  def read(kryo: Kryo, input: Input, klazz: Class[SnpTable]): SnpTable = {
+    val indicesSize = input.readInt()
+    val indices = new Array[(String, (Int, Int))](indicesSize)
+    (0 until indicesSize).foreach(i => {
+      indices(i) = (input.readString(), (input.readInt(), input.readInt()))
+    })
+    val sitesSize = input.readInt()
+    val sites = new Array[Long](sitesSize)
+    (0 until sitesSize).foreach(i => {
+      sites(i) = input.readLong()
+    })
+    new SnpTable(indices.toMap, sites)
   }
 }

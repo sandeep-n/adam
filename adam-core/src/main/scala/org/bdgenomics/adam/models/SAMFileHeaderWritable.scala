@@ -17,40 +17,60 @@
  */
 package org.bdgenomics.adam.models
 
-import htsjdk.samtools.{ SAMFileHeader, SAMProgramRecord }
-import org.bdgenomics.adam.rdd.ADAMContext._
+import htsjdk.samtools.SAMFileHeader
+import org.bdgenomics.adam.rdd.ADAMContext
+import org.bdgenomics.adam.rdd.read.AlignmentRecordRDD
+import scala.collection.JavaConversions._
 
-object SAMFileHeaderWritable {
+private[adam] object SAMFileHeaderWritable {
+
+  /**
+   * Creates a serializable representation of a SAM file header.
+   *
+   * @param header SAMFileHeader to create serializable representation of.
+   * @return A serializable representation of the header that can be transformed
+   *   back into the htsjdk representation on the executor.
+   */
   def apply(header: SAMFileHeader): SAMFileHeaderWritable = {
     new SAMFileHeaderWritable(header)
   }
 }
 
-class SAMFileHeaderWritable(@transient hdr: SAMFileHeader) extends Serializable {
+/**
+ * Wrapper for the SAM file header to get around serialization issues.
+ *
+ * The SAM file header is not serialized and is instead recreated on demaind.
+ *
+ * @param hdr A SAM file header to extract metadata from.
+ */
+private[adam] class SAMFileHeaderWritable private (hdr: SAMFileHeader) extends Serializable {
+
   // extract fields that are needed in order to recreate the SAMFileHeader
-  protected val text = {
+  private val text = {
     val txt: String = hdr.getTextHeader
     Option(txt)
   }
-  protected val sd = SequenceDictionary(hdr.getSequenceDictionary)
-  protected val pgl = {
-    val pgs: List[SAMProgramRecord] = hdr.getProgramRecords
-    pgs.map(ProgramRecord(_))
+  private val sd = SequenceDictionary(hdr.getSequenceDictionary)
+  private val pgl = {
+    val pgs = hdr.getProgramRecords
+    pgs.map(ADAMContext.convertSAMProgramRecord)
   }
-  protected val comments = {
-    val cmts: List[java.lang.String] = hdr.getComments
+  private val comments = {
+    val cmts = hdr.getComments
     cmts.flatMap(Option(_)) // don't trust samtools to return non-nulls
   }
-  protected val rgs = RecordGroupDictionary.fromSAMHeader(hdr)
+  private val rgs = RecordGroupDictionary.fromSAMHeader(hdr)
 
-  // recreate header when requested to get around header not being serializable
+  /**
+   * Recreate header when requested to get around header not being serializable.
+   */
   @transient lazy val header = {
     val h = new SAMFileHeader()
 
     // add back optional fields
     text.foreach(h.setTextHeader)
     h.setSequenceDictionary(sd.toSAMSequenceDictionary)
-    pgl.foreach(p => h.addProgramRecord(p.toSAMProgramRecord))
+    pgl.foreach(p => h.addProgramRecord(AlignmentRecordRDD.processingStepToSam(p)))
     comments.foreach(h.addComment)
     rgs.recordGroups.foreach(rg => h.addReadGroup(rg.toSAMReadGroupRecord))
 

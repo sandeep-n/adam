@@ -237,4 +237,13 @@ class SmithWatermanSuite extends FunSuite {
     assert(sw.xStart === 8)
   }
 
+  test("smithWaterman - simple alignment") {
+    val sw = new SmithWatermanConstantGapScoring("AAA",
+      "AAT",
+      1.0, 0.0, -0.333, -0.333)
+    assert(sw.cigarX.toString === "3M")
+    assert(sw.cigarY.toString === "3M")
+    assert(sw.xStart === 0)
+  }
+
 }

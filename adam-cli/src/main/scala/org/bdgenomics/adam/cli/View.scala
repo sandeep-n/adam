@@ -19,7 +19,6 @@ package org.bdgenomics.adam.cli
 
 import org.apache.spark.SparkContext
 import org.apache.spark.rdd.RDD
-import org.bdgenomics.adam.models.{ RecordGroupDictionary, SequenceDictionary }
 import org.bdgenomics.adam.rdd.ADAMContext._
 import org.bdgenomics.adam.rdd.ADAMSaveAnyArgs
 import org.bdgenomics.formats.avro.AlignmentRecord
@@ -30,7 +29,7 @@ class ViewArgs extends Args4jBase with ParquetArgs with ADAMSaveAnyArgs {
   @Argument(required = true, metaVar = "INPUT", usage = "The ADAM, BAM or SAM file to view", index = 0)
   var inputPath: String = null
 
-  @Argument(required = false, metaVar = "OUTPUT", usage = "Location to write output data", index = 1)
+  // left null until constructor
   var outputPath: String = null
 
   @Args4jOption(
@@ -80,11 +79,18 @@ class ViewArgs extends Args4jBase with ParquetArgs with ADAMSaveAnyArgs {
   )
   var outputPathArg: String = null
 
-  @Args4jOption(required = false, name = "-sort_fastq_output", usage = "Sets whether to sort the FASTQ output, if saving as FASTQ. False by default. Ignored if not saving as FASTQ.")
-  var sortFastqOutput: Boolean = false
-
-  @Args4jOption(required = false, name = "-single", usage = "Saves OUTPUT as single file")
+  @Args4jOption(required = false, name = "-single",
+    usage = "Saves OUTPUT as single file")
   var asSingleFile: Boolean = false
+  @Args4jOption(required = false, name = "-defer_merging",
+    usage = "Defers merging single file output")
+  var deferMerging: Boolean = false
+  @Args4jOption(required = false, name = "-disable_fast_concat",
+    usage = "Disables the parallel file concatenation engine.")
+  var disableFastConcat: Boolean = false
+
+  // required by ADAMAnySaveArgs
+  var sortFastqOutput: Boolean = false
 }
 
 object View extends BDGCommandCompanion {
@@ -162,15 +168,16 @@ class View(val args: ViewArgs) extends BDGSparkCommand[ViewArgs] {
 
   def run(sc: SparkContext) = {
 
-    val reads = applyFilters(sc.loadAlignments(args.inputPath))
+    val reads = sc.loadAlignments(args.inputPath)
+      .transform(applyFilters(_))
 
-    if (args.outputPath != null)
-      reads.adamAlignedRecordSave(args, SequenceDictionary.empty, RecordGroupDictionary.empty)
-    else {
+    if (args.outputPath != null) {
+      reads.save(args)
+    } else {
       if (args.printCount) {
-        println(reads.count())
+        println(reads.rdd.count())
       } else {
-        println(reads.adamSAMString(SequenceDictionary.empty, RecordGroupDictionary.empty))
+        println(reads.saveAsSamString())
       }
     }
   }

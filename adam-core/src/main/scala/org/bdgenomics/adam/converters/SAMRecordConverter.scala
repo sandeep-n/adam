@@ -18,28 +18,49 @@
 package org.bdgenomics.adam.converters
 
 import htsjdk.samtools.{
-  CigarElement,
   SAMReadGroupRecord,
   SAMRecord,
   SAMUtils
 }
-import org.apache.spark.Logging
-import org.bdgenomics.adam.models.{
-  Attribute,
-  RecordGroupDictionary,
-  SequenceDictionary,
-  SequenceRecord,
-  TagType
-}
+import org.bdgenomics.utils.misc.Logging
+import org.bdgenomics.adam.models.Attribute
 import org.bdgenomics.adam.util.AttributeUtils
 import org.bdgenomics.formats.avro.AlignmentRecord
 import scala.collection.JavaConverters._
 
-class SAMRecordConverter extends Serializable with Logging {
-  def convert(
-    samRecord: SAMRecord,
-    dict: SequenceDictionary,
-    readGroups: RecordGroupDictionary): AlignmentRecord = {
+/**
+ * Helper class for converting SAMRecords into AlignmentRecords.
+ */
+private[adam] class SAMRecordConverter extends Serializable with Logging {
+
+  /**
+   * Returns true if a tag should not be kept in the attributes field.
+   *
+   * The SAM/BAM format supports attributes, which is a key/value pair map. In
+   * ADAM, we have promoted some of these fields to "primary" fields, so that we
+   * can more efficiently access them. These include the MD tag, which describes
+   * substitutions against the reference; the OQ tag, which describes the
+   * original read base qualities; and the OP and OC tags, which describe the
+   * original read alignment position and CIGAR.
+   *
+   * @param attrTag Tag name to check.
+   * @return Returns true if the tag should be skipped.
+   */
+  private[converters] def skipTag(attrTag: String): Boolean = attrTag match {
+    case "OQ" => true
+    case "OP" => true
+    case "OC" => true
+    case "MD" => true
+    case _    => false
+  }
+
+  /**
+   * Converts a SAM record into an Avro AlignmentRecord.
+   *
+   * @param samRecord Record to convert.
+   * @return Returns the original record converted into Avro.
+   */
+  def convert(samRecord: SAMRecord): AlignmentRecord = {
     try {
       val cigar: String = samRecord.getCigarString
       val startTrim = if (cigar == "*") {
@@ -80,14 +101,12 @@ class SAMRecordConverter extends Serializable with Logging {
       // This prevents looking up a -1 in the sequence dictionary
       val readReference: Int = samRecord.getReferenceIndex
       if (readReference != SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
-        dict(samRecord.getReferenceName).foreach { (rec) =>
-          builder.setContig(SequenceRecord.toADAMContig(rec))
-        }
+        builder.setContigName(samRecord.getReferenceName)
 
         // set read alignment flag
         val start: Int = samRecord.getAlignmentStart
         assert(start != 0, "Start cannot equal 0 if contig is set.")
-        builder.setStart((start - 1))
+        builder.setStart(start - 1L)
 
         // set OP and OC flags, if applicable
         if (samRecord.getAttribute("OP") != null) {
@@ -127,14 +146,12 @@ class SAMRecordConverter extends Serializable with Logging {
       val mateReference: Int = samRecord.getMateReferenceIndex
 
       if (mateReference != SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX) {
-        dict(samRecord.getMateReferenceName).foreach { (rec) =>
-          builder.setMateContig(SequenceRecord.toADAMContig(rec))
-        }
+        builder.setMateContigName(samRecord.getMateReferenceName)
 
         val mateStart = samRecord.getMateAlignmentStart
         if (mateStart > 0) {
           // We subtract one here to be 0-based offset
-          builder.setMateAlignmentStart(mateStart - 1)
+          builder.setMateAlignmentStart(mateStart - 1L)
         }
       }
 
@@ -170,14 +187,14 @@ class SAMRecordConverter extends Serializable with Logging {
       var tags = List[Attribute]()
       val tlen = samRecord.getInferredInsertSize
       if (tlen != 0) {
-        builder.setInferredInsertSize(tlen)
+        builder.setInferredInsertSize(tlen.toLong)
       }
       if (samRecord.getAttributes != null) {
         samRecord.getAttributes.asScala.foreach {
           attr =>
             if (attr.tag == "MD") {
               builder.setMismatchingPositions(attr.value.toString)
-            } else {
+            } else if (!skipTag(attr.tag)) {
               tags ::= AttributeUtils.convertSAMTagAndValue(attr)
             }
         }
@@ -200,5 +217,4 @@ class SAMRecordConverter extends Serializable with Logging {
       }
     }
   }
-
 }

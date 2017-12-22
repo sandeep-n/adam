@@ -22,18 +22,18 @@ import org.bdgenomics.adam.models.ReferenceRegion
 import org.bdgenomics.adam.rdd.ADAMContext._
 import org.bdgenomics.adam.rich.RichAlignmentRecord
 import org.bdgenomics.adam.util.ADAMFunSuite
-import org.bdgenomics.formats.avro.{ AlignmentRecord, Contig }
+import org.bdgenomics.formats.avro.AlignmentRecord
 
 class IndelRealignmentTargetSuite extends ADAMFunSuite {
 
   // Note: this can't be lazy vals because Spark won't find the RDDs after the first test
   def mason_reads: RDD[RichAlignmentRecord] = {
-    val path = resourcePath("small_realignment_targets.sam")
+    val path = testFile("small_realignment_targets.sam")
     sc.loadAlignments(path).rdd.map(RichAlignmentRecord(_))
   }
 
   def artificial_reads: RDD[RichAlignmentRecord] = {
-    val path = resourcePath("artificial.sam")
+    val path = testFile("artificial.sam")
     sc.loadAlignments(path).rdd.map(RichAlignmentRecord(_))
   }
 
@@ -49,9 +49,7 @@ class IndelRealignmentTargetSuite extends ADAMFunSuite {
       .setReadNegativeStrand(false)
       .setMapq(60)
       .setQual(sequence) // no typo, we just don't care
-      .setContig(Contig.newBuilder()
-        .setContigName("1")
-        .build())
+      .setContigName("1")
       .setMismatchingPositions(mdtag)
       .build())
   }
@@ -81,6 +79,12 @@ class IndelRealignmentTargetSuite extends ADAMFunSuite {
     assert(targets.head.variation.get.end === 8)
     assert(targets.head.readRange.start === 3)
     assert(targets.head.readRange.end === 10)
+    assert(TargetOrdering.contains(targets.head, read))
+    assert(!TargetOrdering.lt(targets.head, read))
+    val read2 = make_read(2L, "2M3D2M", "2^AAA2", 4, 7)
+    val read4 = make_read(4L, "2M3D2M", "2^AAA2", 4, 7)
+    assert(!TargetOrdering.lt(targets.head, read))
+    assert(TargetOrdering.lt(targets.head, read4))
   }
 
   sparkTest("creating simple target from read with insertion") {
@@ -208,11 +212,11 @@ class IndelRealignmentTargetSuite extends ADAMFunSuite {
 
     // the first read has no indels
     // the second read has a one-base deletion and a one-base insertion
-    assert(targets_collected(0).variation.get.start == 702289 && targets_collected(0).variation.get.end == 702324)
+    // we do not generate targets for reads with multiple indels
     // the third read has a one base deletion
-    assert(targets_collected(1).variation.get.start == 807755 && targets_collected(1).variation.get.end == 807756)
+    assert(targets_collected(0).variation.get.start == 807755 && targets_collected(0).variation.get.end == 807756)
     // read 7 has a single 4 bp deletion
-    assert(targets_collected(5).variation.get.length === 4)
-    assert(targets_collected(5).variation.get.start == 869644 && targets_collected(5).variation.get.end == 869648)
+    assert(targets_collected(4).variation.get.length === 4)
+    assert(targets_collected(4).variation.get.start == 869644 && targets_collected(4).variation.get.end == 869648)
   }
 }

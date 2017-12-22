@@ -18,7 +18,6 @@
 package org.bdgenomics.adam.models
 
 import htsjdk.samtools.SAMReadGroupRecord
-import org.bdgenomics.formats.avro.AlignmentRecord
 import org.scalatest.FunSuite
 
 class RecordGroupDictionarySuite extends FunSuite {
@@ -40,7 +39,7 @@ class RecordGroupDictionarySuite extends FunSuite {
 
   test("sample name must be set") {
     val samRGR = new SAMReadGroupRecord("myId")
-    intercept[AssertionError] {
+    intercept[IllegalArgumentException] {
       RecordGroup(samRGR)
     }
   }
@@ -59,5 +58,37 @@ class RecordGroupDictionarySuite extends FunSuite {
     assert(!rg1b.equals(rg2))
     assert(!rg1b.equals(rg3))
     assert(!rg2.equals(rg3))
+  }
+
+  test("get samples from record group dictionary") {
+    val rgd = RecordGroupDictionary(Seq(RecordGroup("sample1", "rg1"),
+      RecordGroup("sample1", "rg2"),
+      RecordGroup("sample1", "rg3"),
+      RecordGroup("sample1", "rg4"),
+      RecordGroup("sample1", "rg5"),
+      RecordGroup("sample2", "rgSample2"),
+      RecordGroup("sample3", "rg1Sample3"),
+      RecordGroup("sample3", "rg2Sample3")))
+    assert(!rgd.isEmpty)
+    val samples = rgd.toSamples
+
+    assert(samples.size === 3)
+    assert(samples.count(_.getSampleId == "sample1") === 1)
+    assert(samples.count(_.getSampleId == "sample2") === 1)
+    assert(samples.count(_.getSampleId == "sample3") === 1)
+  }
+
+  test("empty record group is empty") {
+    val emptyRgd = RecordGroupDictionary.empty
+
+    assert(emptyRgd.isEmpty)
+    assert(emptyRgd.recordGroups.size === 0)
+  }
+
+  test("merging a dictionary with itself should work") {
+    val rgd = RecordGroupDictionary(Seq(RecordGroup("sample1", "rg1")))
+
+    val mergedRgd = rgd ++ rgd
+    assert(rgd === mergedRgd)
   }
 }

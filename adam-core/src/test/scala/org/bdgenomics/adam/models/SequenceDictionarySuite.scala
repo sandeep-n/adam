@@ -17,11 +17,15 @@
  */
 package org.bdgenomics.adam.models
 
-import org.bdgenomics.adam.rdd.ADAMContext._
-import htsjdk.samtools.{ SAMFileReader, SAMSequenceRecord, SAMSequenceDictionary }
-import org.bdgenomics.adam.util.ADAMFunSuite
-import org.scalatest.FunSuite
 import java.io.File
+import htsjdk.samtools.{
+  SAMSequenceDictionary,
+  SAMSequenceRecord
+}
+import htsjdk.variant.utils.SAMSequenceDictionaryExtractor
+import htsjdk.variant.vcf.VCFFileReader
+import org.bdgenomics.adam.util.ADAMFunSuite
+import scala.collection.JavaConversions._
 
 class SequenceDictionarySuite extends ADAMFunSuite {
   test("Convert from sam sequence record and back") {
@@ -34,14 +38,14 @@ class SequenceDictionarySuite extends ADAMFunSuite {
     assert(asASR.length === 1000L)
     assert(asASR.url === Some("http://bigdatagenomics.github.io/1"))
 
-    val asPSR: SAMSequenceRecord = SequenceRecord.toSAMSequenceRecord(asASR)
+    val asPSR: SAMSequenceRecord = asASR.toSAMSequenceRecord
 
     assert(sr.isSameSequence(asPSR))
   }
 
   test("Convert from SAM sequence dictionary file (with extra fields)") {
-    val path = resourcePath("dict_with_accession.dict")
-    val ssd = SAMFileReader.getSequenceDictionary(new File(path))
+    val path = testFile("dict_with_accession.dict")
+    val ssd = SAMSequenceDictionaryExtractor.extractDictionary(new File(path))
 
     val chr1 = ssd.getSequence("1") // Validate that extra fields are parsed
     assert(chr1 != null)
@@ -54,8 +58,8 @@ class SequenceDictionarySuite extends ADAMFunSuite {
   }
 
   test("merge into existing dictionary") {
-    val path = resourcePath("dict_with_accession.dict")
-    val ssd = SAMFileReader.getSequenceDictionary(new File(path))
+    val path = testFile("dict_with_accession.dict")
+    val ssd = SAMSequenceDictionaryExtractor.extractDictionary(new File(path))
 
     val asd = SequenceDictionary(ssd)
     assert(asd.containsRefName("1"))
@@ -67,10 +71,10 @@ class SequenceDictionarySuite extends ADAMFunSuite {
   }
 
   test("Convert from SAM sequence dictionary and back") {
-    val path = resourcePath("dict_with_accession.dict")
-    val ssd = SAMFileReader.getSequenceDictionary(new File(path))
+    val path = testFile("dict_with_accession.dict")
+    val ssd = SAMSequenceDictionaryExtractor.extractDictionary(new File(path))
     val asd = SequenceDictionary(ssd)
-    ssd.assertSameDictionary(SequenceDictionary.toSAMSequenceDictionary(asd))
+    ssd.assertSameDictionary(asd.toSAMSequenceDictionary)
   }
 
   test("Can retrieve sequence by name") {
@@ -208,5 +212,20 @@ class SequenceDictionarySuite extends ADAMFunSuite {
     assert(seq.get(3).getSequenceName === "4")
     assert(seq.get(4).getSequenceName === "MT")
     assert(seq.get(5).getSequenceName === "X")
+  }
+
+  test("load sequence dictionary from VCF file") {
+    val path = testFile("small.vcf")
+    val fileReader = new VCFFileReader(new File(path), false)
+    val sd = SequenceDictionary.fromVCFHeader(fileReader.getFileHeader)
+
+    assert(sd.records.size === 1)
+    assert(sd.records.head.name === "1")
+  }
+
+  test("empty sequence dictionary must be empty") {
+    val sd = SequenceDictionary.empty
+    assert(sd.records.size === 0)
+    assert(sd.isEmpty)
   }
 }

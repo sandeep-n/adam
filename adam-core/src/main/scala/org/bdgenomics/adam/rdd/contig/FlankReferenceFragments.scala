@@ -17,14 +17,29 @@
  */
 package org.bdgenomics.adam.rdd.contig
 
-import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import org.bdgenomics.adam.models.{ ReferenceRegion, SequenceDictionary }
 import org.bdgenomics.adam.rdd.ReferencePartitioner
 import org.bdgenomics.formats.avro.NucleotideContigFragment
 
+/**
+ * Object that extends all of the fragments in an RDD of contig fragments
+ * with the sequence flanking said fragment.
+ */
 private[contig] object FlankReferenceFragments extends Serializable {
 
+  /**
+   * Adds flanks to sequence fragments in an RDD.
+   *
+   * Assumes that after sorting, all fragments are contiguous.
+   *
+   * @param rdd The RDD to flank.
+   * @param sd The sequence dictionary describing all contigs in this sequence
+   *   dictionary.
+   * @param flankSize The size of flanking sequence to add to each fragment.
+   * @return Returns a new RDD where each fragment has been extended with
+   *   flanking sequence.
+   */
   def apply(
     rdd: RDD[NucleotideContigFragment],
     sd: SequenceDictionary,
@@ -47,18 +62,21 @@ private[contig] object FlankReferenceFragments extends Serializable {
 
         // are the two fragments adjacent? if so, we must add the flanking sequences
         if (copyLastFragment._1.isAdjacent(f._1)) {
-          val lastSequence = copyLastFragment._2.getFragmentSequence
-          val currSequence = f._2.getFragmentSequence
+          val lastSequence = copyLastFragment._2.getSequence
+          val currSequence = f._2.getSequence
 
           // update fragments with flanking sequences
-          copyLastFragment._2.setFragmentSequence(lastSequence + currSequence.take(flankSize))
+          copyLastFragment._2.setSequence(lastSequence + currSequence.take(flankSize))
           copyLastFragment._2.setDescription(Option(copyLastFragment._2.getDescription)
             .fold("rr")(_ + "rr"))
-          f._2.setFragmentSequence(lastSequence.takeRight(flankSize) + currSequence)
+          f._2.setSequence(lastSequence.takeRight(flankSize) + currSequence)
           f._2.setDescription("f")
 
-          // we must change the start position of the fragment we are appending in front of
-          f._2.setFragmentStartPosition(f._2.getFragmentStartPosition - flankSize.toLong)
+          // we must change the start position of the fragment we are prepending to
+          f._2.setStart(f._2.getStart - flankSize.toLong)
+          // and the end position of the fragment we are appending to
+          copyLastFragment._2.setEnd(
+            copyLastFragment._2.getStart + copyLastFragment._2.getSequence.length - 1L)
         }
 
         // overwrite last fragment

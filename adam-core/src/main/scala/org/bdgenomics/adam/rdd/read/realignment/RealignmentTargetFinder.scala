@@ -17,14 +17,14 @@
  */
 package org.bdgenomics.adam.rdd.read.realignment
 
-import org.apache.spark.Logging
+import org.bdgenomics.utils.misc.Logging
 import org.apache.spark.rdd.RDD
 import org.bdgenomics.adam.rich.RichAlignmentRecord
 import org.bdgenomics.adam.instrumentation.Timers._
 import scala.annotation.tailrec
 import scala.collection.immutable.TreeSet
 
-object RealignmentTargetFinder {
+private[realignment] object RealignmentTargetFinder {
 
   /**
    * Generates realignment targets from a set of reads.
@@ -40,7 +40,7 @@ object RealignmentTargetFinder {
   }
 }
 
-class RealignmentTargetFinder extends Serializable with Logging {
+private[realignment] class RealignmentTargetFinder extends Serializable with Logging {
 
   /**
    * Joins two sorted sets of targets together. Is tail call recursive.
@@ -120,5 +120,4 @@ class RealignmentTargetFinder extends Serializable with Logging {
 
     targetSet
   }
-
 }

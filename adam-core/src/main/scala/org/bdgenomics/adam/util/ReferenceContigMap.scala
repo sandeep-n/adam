@@ -17,13 +17,39 @@
  */
 package org.bdgenomics.adam.util
 
+import com.esotericsoftware.kryo.{ Kryo, Serializer }
+import com.esotericsoftware.kryo.io.{ Input, Output }
 import org.apache.spark.rdd.RDD
-// NOTE(ryan): this is necessary for Spark <= 1.2.1.
-import org.apache.spark.SparkContext._
-import org.bdgenomics.adam.models.ReferenceRegion
+import org.bdgenomics.adam.models.{
+  ReferenceRegion,
+  SequenceDictionary,
+  SequenceRecord
+}
+import org.bdgenomics.adam.serialization.AvroSerializer
 import org.bdgenomics.formats.avro.NucleotideContigFragment
 
+/**
+ * A broadcastable ReferenceFile backed by a map containing contig name ->
+ * Seq[NucleotideContigFragment] pairs.
+ *
+ * @param contigMap a map containing a Seq of contig fragments per contig.
+ */
 case class ReferenceContigMap(contigMap: Map[String, Seq[NucleotideContigFragment]]) extends ReferenceFile {
+
+  private def keys(): String = {
+    contigMap.keys.toList.sortBy(x => x).mkString(", ")
+  }
+
+  override def toString(): String = {
+    "ReferenceContigMap(%s)".format(keys())
+  }
+
+  /**
+   * The sequence dictionary corresponding to the contigs in this collection of fragments.
+   */
+  val sequences: SequenceDictionary = new SequenceDictionary(contigMap.map(r =>
+    SequenceRecord(r._1, r._2.map(_.getEnd).max)).toVector)
+
   /**
    * Extract reference sequence from the file.
    *
@@ -35,11 +61,11 @@ case class ReferenceContigMap(contigMap: Map[String, Seq[NucleotideContigFragmen
       .getOrElse(
         region.referenceName,
         throw new Exception(
-          s"Contig ${region.referenceName} not found in reference map with keys: ${contigMap.keys.toList.sortBy(x => x).mkString(", ")}"
+          "Contig %s not found in reference map with keys: %s".format(region.referenceName, keys())
         )
       )
-      .dropWhile(f => f.getFragmentStartPosition + f.getFragmentSequence.length < region.start)
-      .takeWhile(_.getFragmentStartPosition < region.end)
+      .dropWhile(f => f.getStart + f.getSequence.length < region.start)
+      .takeWhile(_.getStart < region.end)
       .map(
         clipFragment(_, region.start, region.end)
       )
@@ -50,26 +76,70 @@ case class ReferenceContigMap(contigMap: Map[String, Seq[NucleotideContigFragmen
     val min =
       math.max(
         0L,
-        start - fragment.getFragmentStartPosition
+        start - fragment.getStart
       ).toInt
 
     val max =
       math.min(
-        fragment.getFragmentSequence.length,
-        end - fragment.getFragmentStartPosition
+        fragment.getSequence.length,
+        end - fragment.getStart
       ).toInt
 
-    fragment.getFragmentSequence.substring(min, max)
+    fragment.getSequence.substring(min, max)
   }
 }
 
+/**
+ * Companion object for creating a ReferenceContigMap from an RDD of contig
+ * fragments.
+ */
 object ReferenceContigMap {
-  def apply(fragments: RDD[NucleotideContigFragment]): ReferenceContigMap =
+
+  /**
+   * Builds a ReferenceContigMap from an RDD of fragments.
+   *
+   * @param fragments RDD of nucleotide contig fragments describing a genome
+   *   reference.
+   * @return Returns a serializable wrapper around these fragments that enables
+   *   random access into the reference genome.
+   */
+  def apply(fragments: RDD[NucleotideContigFragment]): ReferenceContigMap = {
     ReferenceContigMap(
       fragments
-        .groupBy(_.getContig.getContigName)
-        .mapValues(_.toSeq.sortBy(_.getFragmentStartPosition))
+        .groupBy(_.getContigName)
+        .mapValues(_.toSeq.sortBy(_.getStart))
         .collectAsMap
         .toMap
     )
+  }
+}
+
+class ReferenceContigMapSerializer extends Serializer[ReferenceContigMap] {
+  private val ncfSerializer = new AvroSerializer[NucleotideContigFragment]
+
+  def write(kryo: Kryo, out: Output, record: ReferenceContigMap) = {
+    out.writeInt(record.contigMap.size)
+    record.contigMap.foreach(p => {
+      out.writeString(p._1)
+      out.writeInt(p._2.size)
+      p._2.foreach(ncf => {
+        ncfSerializer.write(kryo, out, ncf)
+      })
+    })
+  }
+
+  def read(kryo: Kryo, in: Input, clazz: Class[ReferenceContigMap]): ReferenceContigMap = {
+    val n = in.readInt()
+    val array = new Array[(String, Seq[NucleotideContigFragment])](n)
+    (0 until n).foreach(idx => {
+      val key = in.readString()
+      val numNcfs = in.readInt()
+      val ncfArray = new Array[NucleotideContigFragment](numNcfs)
+      (0 until numNcfs).foreach(jdx => {
+        ncfArray(jdx) = ncfSerializer.read(kryo, in, classOf[NucleotideContigFragment])
+      })
+      array(idx) = (key, ncfArray.toSeq)
+    })
+    ReferenceContigMap(array.toMap)
+  }
 }

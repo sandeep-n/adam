@@ -18,32 +18,16 @@
 package org.bdgenomics.adam.rich
 
 import htsjdk.samtools.{ Cigar, CigarOperator, CigarElement }
-import org.bdgenomics.adam.util.ImplicitJavaConversions._
 import scala.annotation.tailrec
+import scala.collection.JavaConversions._
+import scala.collection.mutable.Buffer
 
-object RichCigar {
-
-  def apply(cigar: Cigar) = {
-    new RichCigar(cigar)
-  }
-
-  implicit def cigarToRichCigar(cigar: Cigar): RichCigar = new RichCigar(cigar)
-
-}
-
-class RichCigar(cigar: Cigar) {
-
-  lazy val numElements: Int = cigar.numCigarElements
-
-  // number of alignment blocks is defined as the number of segments in the sequence that are a cigar match
-  lazy val numAlignmentBlocks: Int = {
-    cigar.getCigarElements.map(element => {
-      element.getOperator match {
-        case CigarOperator.M => 1
-        case _               => 0
-      }
-    }).sum
-  }
+/**
+ * A wrapper around a CIGAR object that provides additional convenience methods.
+ *
+ * @param cigar The CIGAR describing an alignment.
+ */
+private[adam] case class RichCigar(cigar: Cigar) {
 
   /**
    * Moves a single element in the cigar left by one position.
@@ -51,10 +35,10 @@ class RichCigar(cigar: Cigar) {
    * @param index Index of the element to move.
    * @return New cigar with this element moved left.
    */
-  def moveLeft(index: Int): Cigar = {
+  def moveLeft(index: Int): RichCigar = {
     // var elements = List[CigarElement]()
     // deepclone instead of empty list initialization
-    var elements = cigar.getCigarElements.map(e => new CigarElement(e.getLength, e.getOperator))
+    val elements = cigar.getCigarElements.map(e => new CigarElement(e.getLength, e.getOperator))
 
     /**
      * Moves an element of a cigar left.
@@ -106,9 +90,14 @@ class RichCigar(cigar: Cigar) {
     }
 
     // create cigar from new list
-    new Cigar(moveCigarLeft(List[CigarElement](), index, elements))
+    RichCigar(new Cigar(moveCigarLeft(List[CigarElement](), index, elements.toList)))
   }
 
+  /**
+   * @return Gets the length of the alignment as described by the CIGAR.
+   *
+   * @see isWellFormed
+   */
   def getLength(): Int = {
     cigar.getCigarElements.map(_.getLength).sum
   }
@@ -118,9 +107,47 @@ class RichCigar(cigar: Cigar) {
    * the read length.
    *
    * @param readLength Length of the read sequence.
+   * @return Returns true if the given read length matches the alignment length.
+   *
+   * @see getLength
    */
   def isWellFormed(readLength: Int): Boolean = {
     readLength == getLength
   }
 
+  /**
+   * @param ops A collection of cigar operators to look at the head of.
+   * @return Returns the number of soft clipped bases from the start of the
+   *    cigar.
+   */
+  private def getSoftClippedBases(ops: Buffer[CigarElement]): Int = {
+    ops.dropWhile(_.getOperator == CigarOperator.H)
+      .takeWhile(_.getOperator == CigarOperator.S)
+      .headOption
+      .fold(0)(_.getLength)
+  }
+
+  /**
+   * @return Returns the number of bases soft clipped from the start of the
+   *   read. Disregards hard clipped bases.
+   */
+  def softClippedBasesAtStart: Int = {
+    if (cigar.isLeftClipped) {
+      getSoftClippedBases(cigar.getCigarElements)
+    } else {
+      0
+    }
+  }
+
+  /**
+   * @return Returns the number of bases soft clipped from the end of the read.
+   *   Disregards hard clipped bases.
+   */
+  def softClippedBasesAtEnd: Int = {
+    if (cigar.isRightClipped) {
+      getSoftClippedBases(cigar.getCigarElements.reverse)
+    } else {
+      0
+    }
+  }
 }

@@ -21,7 +21,7 @@ import java.util.logging.Level._
 import javax.inject.Inject
 import com.google.inject.AbstractModule
 import net.codingwell.scalaguice.ScalaModule
-import org.apache.spark.Logging
+import org.bdgenomics.utils.misc.Logging
 import org.bdgenomics.adam.util.ParquetLogger
 import org.bdgenomics.utils.cli._
 
@@ -32,41 +32,30 @@ object ADAMMain {
       CommandGroup(
         "ADAM ACTIONS",
         List(
-          CalculateDepth,
           CountReadKmers,
           CountContigKmers,
-          Transform,
-          Adam2Fastq,
-          /* TODO (nealsid): Reimplement in terms of new schema
-	  ComputeVariants
-	*/
-          PluginExecutor,
-          Flatten
+          TransformAlignments,
+          TransformFeatures,
+          TransformGenotypes,
+          TransformVariants,
+          MergeShards,
+          Reads2Coverage
         )
       ),
       CommandGroup(
         "CONVERSION OPERATIONS",
         List(
-          Vcf2ADAM,
-          VcfAnnotation2ADAM,
-          ADAM2Vcf,
           Fasta2ADAM,
           ADAM2Fasta,
-          Features2ADAM,
-          WigFix2Bed,
-          Fragments2Reads,
-          Reads2Fragments
+          ADAM2Fastq,
+          TransformFragments
         )
       ),
       CommandGroup(
         "PRINT",
         List(
           PrintADAM,
-          PrintGenes,
           FlagStat,
-          PrintTags,
-          ListDict,
-          AlleleCount,
           View
         )
       )
@@ -85,22 +74,23 @@ class ADAMMain @Inject() (commandGroups: List[CommandGroup]) extends Logging {
 
   private def printLogo() {
     print("\n")
-    println("""       e         888~-_          e             e    e
-               |      d8b        888   \        d8b           d8b  d8b
-               |     /Y88b       888    |      /Y88b         d888bdY88b
-               |    /  Y88b      888    |     /  Y88b       / Y88Y Y888b
-               |   /____Y88b     888   /     /____Y88b     /   YY   Y888b
-               |  /      Y88b    888_-~     /      Y88b   /          Y888b""".stripMargin('|'))
+    println("""       e        888~-_         e            e    e
+               |      d8b       888   \       d8b          d8b  d8b
+               |     /Y88b      888    |     /Y88b        d888bdY88b
+               |    /  Y88b     888    |    /  Y88b      / Y88Y Y888b
+               |   /____Y88b    888   /    /____Y88b    /   YY   Y888b
+               |  /      Y88b   888_-~    /      Y88b  /          Y888b""".stripMargin('|'))
   }
 
   private def printVersion() {
     printLogo()
     val about = new About()
-    println("\nADAM version: %s".format(about.version()))
-    if (about.isSnapshot()) {
-      println("Commit: %s Build: %s".format(about.commit(), about.buildTimestamp()))
+    println("\nADAM version: %s".format(about.version))
+    if (about.isSnapshot) {
+      println("Commit: %s Build: %s".format(about.commit, about.buildTimestamp))
     }
-    println("Built for: Scala %s and Hadoop %s".format(about.scalaVersion(), about.hadoopVersion()))
+    println("Built for: Apache Spark %s, Scala %s, and Hadoop %s"
+      .format(about.sparkVersion, about.scalaVersion, about.hadoopVersion))
   }
 
   private def printCommands() {
@@ -117,7 +107,7 @@ class ADAMMain @Inject() (commandGroups: List[CommandGroup]) extends Logging {
 
   def apply(args: Array[String]) {
     log.info("ADAM invoked with args: %s".format(argsToString(args)))
-    if (args.size < 1) {
+    if (args.length < 1) {
       printCommands()
     } else if (args.contains("--version") || args.contains("-version")) {
       printVersion()
@@ -152,7 +142,7 @@ class ADAMMain @Inject() (commandGroups: List[CommandGroup]) extends Logging {
 }
 
 class ADAMModule extends AbstractModule with ScalaModule {
-  def configure {
+  def configure() {
     bind[List[CommandGroup]].toInstance(ADAMMain.defaultCommandGroups)
   }
 }

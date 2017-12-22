@@ -20,8 +20,6 @@ package org.bdgenomics.adam.converters
 import htsjdk.samtools._
 import java.io.File
 import org.scalatest.FunSuite
-import org.bdgenomics.adam.models.{ SequenceRecord, Attribute, RecordGroupDictionary, SequenceDictionary }
-import org.bdgenomics.adam.rdd.ADAMContext._
 import scala.collection.JavaConversions._
 
 class SAMRecordConverterSuite extends FunSuite {
@@ -36,18 +34,14 @@ class SAMRecordConverterSuite extends FunSuite {
     val testIterator = SamReaderFactory.makeDefault().open(testFile)
     val testSAMRecord = testIterator.iterator().next()
 
-    // Creating the two SequenceRecords in file for SequenceDictionary
-    val testSequenceRecord1 = SequenceRecord("1", 249250621L)
-    val testSequenceRecord2 = SequenceRecord("2", 243199373L)
-
-    // SequenceDictionary to be used as parameter during conversion
-    val testSequenceDict = SequenceDictionary(testSequenceRecord1, testSequenceRecord2)
-
-    // RecordGroupDictionary to be used as a parameter during conversion
-    val testRecordGroupDict = new RecordGroupDictionary(Seq())
+    // set the oq, md, oc, and op attributes
+    testSAMRecord.setOriginalBaseQualities("*****".getBytes.map(v => (v - 33).toByte))
+    testSAMRecord.setAttribute("MD", "100")
+    testSAMRecord.setAttribute("OC", "100M")
+    testSAMRecord.setAttribute("OP", 1)
 
     // Convert samRecord to alignmentRecord
-    val testAlignmentRecord = testRecordConverter.convert(testSAMRecord, testSequenceDict, testRecordGroupDict)
+    val testAlignmentRecord = testRecordConverter.convert(testSAMRecord)
 
     // Validating Conversion
     assert(testAlignmentRecord.getCigar === testSAMRecord.getCigarString)
@@ -64,6 +58,11 @@ class SAMRecordConverterSuite extends FunSuite {
     assert(!testAlignmentRecord.getReadPaired)
     assert(testAlignmentRecord.getReadInFragment != 1)
     assert(testAlignmentRecord.getSupplementaryAlignment === testSAMRecord.getSupplementaryAlignmentFlag)
+    assert(testAlignmentRecord.getOrigQual === "*****")
+    assert(testAlignmentRecord.getMismatchingPositions === "100")
+    assert(testAlignmentRecord.getOldCigar === "100M")
+    assert(testAlignmentRecord.getOldPosition === 0L)
+    assert(testAlignmentRecord.getAttributes === "XS:i:0\tAS:i:75\tNM:i:0")
   }
 
   test("testing the fields in an alignmentRecord obtained from an unmapped samRecord conversion") {
@@ -76,18 +75,8 @@ class SAMRecordConverterSuite extends FunSuite {
     val testIterator = SamReaderFactory.makeDefault().open(testFile)
     val testSAMRecord = testIterator.iterator().next()
 
-    // Creating the two SequenceRecords in file for SequenceDictionary
-    val testSequenceRecord1 = SequenceRecord("1", 249250621L)
-    val testSequenceRecord2 = SequenceRecord("2", 243199373L)
-
-    // SequenceDictionary to be used as parameter during conversion
-    val testSequenceDict = SequenceDictionary(testSequenceRecord1, testSequenceRecord2)
-
-    // RecordGroupDictionary to be used as a parameter during conversion
-    val testRecordGroupDict = new RecordGroupDictionary(Seq())
-
     // Convert samRecord to alignmentRecord
-    val testAlignmentRecord = testRecordConverter.convert(testSAMRecord, testSequenceDict, testRecordGroupDict)
+    val testAlignmentRecord = testRecordConverter.convert(testSAMRecord)
 
     // Validating Conversion
     assert(testAlignmentRecord.getCigar === testSAMRecord.getCigarString)
@@ -122,20 +111,19 @@ class SAMRecordConverterSuite extends FunSuite {
     // null out quality
     newSAMRecord.setBaseQualityString("*")
 
-    // SequenceRecord to be put into SequenceDictionary
-    val newSequenceRecord = SequenceRecord("1", 249250621L)
-
-    // SequenceDictionary for conversion method
-    val newSequenceDictionary = SequenceDictionary(newSequenceRecord)
-
-    // No RecordGroup present in file so I'll just make the RecordGroupDictionary Empty
-    val newTestRecordGroupDictionary = new RecordGroupDictionary(Seq())
-
     // Conversion
-    val newAlignmentRecord = newRecordConverter.convert(newSAMRecord, newSequenceDictionary, newTestRecordGroupDictionary)
+    val newAlignmentRecord = newRecordConverter.convert(newSAMRecord)
 
     // Validating Conversion
     assert(newAlignmentRecord.getQual === null)
   }
 
+  test("don't keep denormalized fields") {
+    val rc = new SAMRecordConverter
+
+    assert(rc.skipTag("MD"))
+    assert(rc.skipTag("OQ"))
+    assert(rc.skipTag("OP"))
+    assert(rc.skipTag("OC"))
+  }
 }

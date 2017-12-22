@@ -17,9 +17,8 @@
  */
 package org.bdgenomics.adam.cli
 
-import org.apache.spark.rdd.RDD
-import org.bdgenomics.adam.util.ADAMFunSuite
 import org.bdgenomics.adam.rdd.ADAMContext._
+import org.bdgenomics.adam.util.ADAMFunSuite
 import org.bdgenomics.formats.avro.AlignmentRecord
 import org.bdgenomics.utils.cli.Args4j
 
@@ -33,8 +32,8 @@ class ViewSuite extends ADAMFunSuite {
   sparkBefore("initialize 'reads' Array from flag-values.sam") {
 
     val transform =
-      new Transform(
-        Args4j[TransformArgs](
+      new TransformAlignments(
+        Args4j[TransformAlignmentsArgs](
           Array(
             inputSamPath,
             "unused_output_path"
@@ -42,12 +41,10 @@ class ViewSuite extends ADAMFunSuite {
         )
       )
 
-    val aRdd = sc.loadBam(inputSamPath)
-    val rdd = aRdd.rdd
-    val rgd = aRdd.recordGroups
+    val alignmentRecords = sc.loadBam(inputSamPath)
 
-    reads = transform.apply(rdd, rgd).collect()
-    readsCount = reads.size.toInt
+    reads = transform.apply(alignmentRecords).rdd.collect()
+    readsCount = reads.length
   }
 
   def runView(matchAllBits: Int = -1,
@@ -70,10 +67,10 @@ class ViewSuite extends ADAMFunSuite {
 
     val args: Array[String] =
       (
-        matchAllBitsOpt.toList.flatMap("-f %d".format(_).split(" ")).toList ++
-        mismatchAllBitsOpt.toList.flatMap("-F %d".format(_).split(" ")).toList ++
-        matchSomeBitsOpt.toList.flatMap("-g %d".format(_).split(" ")).toList ++
-        mismatchSomeBitsOpt.toList.flatMap("-G %d".format(_).split(" ")).toList :+
+        matchAllBitsOpt.toList.flatMap("-f %d".format(_).split(" ")) ++
+        mismatchAllBitsOpt.toList.flatMap("-F %d".format(_).split(" ")) ++
+        matchSomeBitsOpt.toList.flatMap("-g %d".format(_).split(" ")) ++
+        mismatchSomeBitsOpt.toList.flatMap("-G %d".format(_).split(" ")) :+
         "unused_input_path"
       ).toArray
 

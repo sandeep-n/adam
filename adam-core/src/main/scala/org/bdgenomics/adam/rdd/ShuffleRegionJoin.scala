@@ -17,253 +17,477 @@
  */
 package org.bdgenomics.adam.rdd
 
-import org.apache.spark.Partitioner
-import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
-import org.bdgenomics.adam.models.ReferenceRegion._
-import org.bdgenomics.adam.models.{ SequenceDictionary, ReferenceRegion }
+import org.bdgenomics.adam.models.ReferenceRegion
 import scala.collection.mutable.ListBuffer
-import scala.math._
 import scala.reflect.ClassTag
 
-case class ShuffleRegionJoin(sd: SequenceDictionary, partitionSize: Long) extends RegionJoin {
+/**
+ * A trait describing join implementations that are based on a sort-merge join.
+ *
+ * @tparam T The type of the left RDD.
+ * @tparam U The type of the right RDD.
+ * @tparam RT The type of data yielded by the left RDD at the output of the
+ *   join. This may not match T if the join is an outer join, etc.
+ * @tparam RU The type of data yielded by the right RDD at the output of the
+ *   join.
+ */
+sealed abstract class ShuffleRegionJoin[T: ClassTag, U: ClassTag, RT, RU]
+    extends RegionJoin[T, U, RT, RU] {
+
+  protected def advanceCache(cache: SetTheoryCache[U, RT, RU],
+                             right: BufferedIterator[(ReferenceRegion, U)],
+                             until: ReferenceRegion)
+  protected def pruneCache(cache: SetTheoryCache[U, RT, RU],
+                           to: ReferenceRegion)
+  protected def postProcessHits(iter: Iterable[U],
+                                currentLeft: T): Iterable[(RT, RU)]
+  protected def finalizeHits(cache: SetTheoryCache[U, RT, RU],
+                             right: BufferedIterator[(ReferenceRegion, U)]): Iterable[(RT, RU)]
+  protected def emptyFn(left: Iterator[(ReferenceRegion, T)],
+                        right: Iterator[(ReferenceRegion, U)]): Iterator[(RT, RU)]
+
+  protected val leftRdd: RDD[(ReferenceRegion, T)]
+  protected val rightRdd: RDD[(ReferenceRegion, U)]
 
   /**
-   * Performs a region join between two RDDs (shuffle join).
+   * Performs a region join between two RDDs (shuffle join). All data should be pre-shuffled and
+   * copartitioned.
    *
-   * This implementation is shuffle-based, so does not require collecting one side into memory
-   * like BroadcastRegionJoin.  It basically performs a global sort of each RDD by genome position
-   * and then does a sort-merge join, similar to the chromsweep implementation in bedtools.  More
-   * specifically, it first defines a set of bins across the genome, then assigns each object in the
-   * RDDs to each bin that they overlap (replicating if necessary), performs the shuffle, and sorts
-   * the object in each bin.  Finally, each bin independently performs a chromsweep sort-merge join.
-   *
-   * @param leftRDD The 'left' side of the join
-   * @param rightRDD The 'right' side of the join
-   * @param tManifest implicit type of leftRDD
-   * @param uManifest implicit type of rightRDD
-   * @tparam T type of leftRDD
-   * @tparam U type of rightRDD
-   * @return An RDD of pairs (x, y), where x is from leftRDD, y is from rightRDD, and the region
+   * @return An RDD of joins (x, y), where x is from leftRDD, y is from rightRDD, and the region
    *         corresponding to x overlaps the region corresponding to y.
    */
-  def partitionAndJoin[T, U](
-    leftRDD: RDD[(ReferenceRegion, T)],
-    rightRDD: RDD[(ReferenceRegion, U)])(implicit tManifest: ClassTag[T],
-                                         uManifest: ClassTag[U]): RDD[(T, U)] = {
-    val sc = leftRDD.context
-
-    // Create the set of bins across the genome for parallel processing
-    val seqLengths = Map(sd.records.toSeq.map(rec => (rec.name, rec.length)): _*)
-    val bins = sc.broadcast(GenomeBins(partitionSize, seqLengths))
-
-    // Key each RDD element to its corresponding bin
-    // Elements may be replicated if they overlap multiple bins
-    val keyedLeft: RDD[((ReferenceRegion, Int), T)] =
-      leftRDD.flatMap(kv => {
-        val (region, x) = kv
-        val lo = bins.value.getStartBin(region)
-        val hi = bins.value.getEndBin(region)
-        (lo to hi).map(i => ((region, i), x))
-      })
-    val keyedRight: RDD[((ReferenceRegion, Int), U)] =
-      rightRDD.flatMap(kv => {
-        val (region, y) = kv
-        val lo = bins.value.getStartBin(region)
-        val hi = bins.value.getEndBin(region)
-        (lo to hi).map(i => ((region, i), y))
-      })
-
-    // Sort each RDD by shuffling the data into the corresponding genome bin
-    // and then sorting within each bin by the key, which sorts by ReferenceRegion.
-    // This should be the most expensive operation. At the end, each genome bin
-    // corresponds to a Spark partition.  The ManualRegionPartitioner pulls out the
-    // bin number for each elt.
-    val sortedLeft: RDD[((ReferenceRegion, Int), T)] =
-      keyedLeft.repartitionAndSortWithinPartitions(ManualRegionPartitioner(bins.value.numBins))
-    val sortedRight: RDD[((ReferenceRegion, Int), U)] =
-      keyedRight.repartitionAndSortWithinPartitions(ManualRegionPartitioner(bins.value.numBins))
-
-    // this function carries out the sort-merge join inside each Spark partition.
-    // It assumes the iterators are sorted.
-    def sweep(leftIter: Iterator[((ReferenceRegion, Int), T)], rightIter: Iterator[((ReferenceRegion, Int), U)]) = {
-      if (leftIter.isEmpty || rightIter.isEmpty) {
-        Seq.empty[(T, U)].toIterator
-      } else {
-        val bufferedLeft = leftIter.buffered
-        val currentBin = bufferedLeft.head._1._2
-        val region = bins.value.invert(currentBin)
-        // return an Iterator[(T, U)]
-        SortedIntervalPartitionJoin(region, bufferedLeft, rightIter)
-      }
-    }
-
-    // Execute the sort-merge join on each partition
-    // Note that we do NOT preserve the partitioning, as the ManualRegionPartitioner
-    // has no meaning for the return type of RDD[(T, U)].  In fact, how
-    // do you order a pair of ReferenceRegions?
-    sortedLeft.zipPartitions(sortedRight, preservesPartitioning = false)(sweep)
+  def compute(): RDD[(RT, RU)] = {
+    leftRdd.zipPartitions(rightRdd)(makeIterator)
   }
-}
 
-/**
- * Partition a genome into a set of bins.
- *
- * Note that this class will not tolerate invalid input, so filter in advance if you use it.
- *
- * @param binSize The size of each bin in nucleotides
- * @param seqLengths A map containing the length of each contig
- */
-case class GenomeBins(binSize: Long, seqLengths: Map[String, Long]) extends Serializable {
-  private val names: Seq[String] = seqLengths.keys.toSeq.sortWith(_ < _)
-  private val lengths: Seq[Long] = names.map(seqLengths(_))
-  private val parts: Seq[Int] = lengths.map(v => round(ceil(v.toDouble / binSize)).toInt)
-  private val cumulParts: Seq[Int] = parts.scan(0)(_ + _)
-  private val contig2cumulParts: Map[String, Int] = Map(names.zip(cumulParts): _*)
+  def partitionAndJoin(left: RDD[(ReferenceRegion, T)], right: RDD[(ReferenceRegion, U)]): RDD[(RT, RU)] = {
+    left.zipPartitions(right)(makeIterator)
+  }
+
+  protected def makeIterator(leftIter: Iterator[(ReferenceRegion, T)],
+                             rightIter: Iterator[(ReferenceRegion, U)]): Iterator[(RT, RU)] = {
+
+    if (leftIter.isEmpty || rightIter.isEmpty) {
+      emptyFn(leftIter, rightIter)
+    } else {
+      val bufferedLeft = leftIter.buffered
+      val bufferedRight = rightIter.buffered
+
+      val cache = new SetTheoryCache[U, RT, RU]
+
+      bufferedLeft.flatMap(f => {
+        val currentLeftRegion = f._1
+
+        advanceCache(cache, bufferedRight, currentLeftRegion)
+        pruneCache(cache, currentLeftRegion)
+
+        processHits(cache, f._2, f._1)
+      }) ++ finalizeHits(cache, bufferedRight)
+    }
+  }
 
   /**
-   * The total number of bins induced by this partition.
-   */
-  def numBins: Int = parts.sum
-
-  /**
-   * Get the bin number corresponding to a query ReferenceRegion.
+   * Process hits for a given object in left.
    *
-   * @param region the query ReferenceRegion
-   * @param useStart whether to use the start or end point of region to pick the bin
+   * @param cache The cache containing potential hits.
+   * @param currentLeft The current object from the left
+   * @param currentLeftRegion The ReferenceRegion of currentLeft.
+   * @return An iterator containing all hits, formatted by postProcessHits.
    */
-  def get(region: ReferenceRegion, useStart: Boolean = true): Int = {
-    val pos = if (useStart) region.start else (region.end - 1)
-    (contig2cumulParts(region.referenceName) + pos / binSize).toInt
-  }
-
-  /**
-   * Get the bin number corresponding to the start of the query ReferenceRegion.
-   */
-  def getStartBin(region: ReferenceRegion): Int = get(region, useStart = true)
-
-  /**
-   * Get the bin number corresponding to the end of the query ReferenceRegion.
-   */
-  def getEndBin(region: ReferenceRegion): Int = get(region, useStart = false)
-
-  /**
-   * Given a bin number, return its corresponding ReferenceRegion.
-   */
-  def invert(bin: Int): ReferenceRegion = {
-    val idx = cumulParts.indexWhere(_ > bin) - 1
-    val name = names(idx)
-    val relPartition = bin - contig2cumulParts(name)
-    val start = relPartition * binSize
-    val end = min((relPartition + 1) * binSize, seqLengths(name))
-    ReferenceRegion(name, start, end)
+  protected def processHits(cache: SetTheoryCache[U, RT, RU],
+                            currentLeft: T,
+                            currentLeftRegion: ReferenceRegion): Iterable[(RT, RU)] = {
+    // post processing formats the hits for each individual type of join
+    postProcessHits(cache.cache
+      .filter(y => {
+        // everything that overlaps the left region is a hit
+        y._1.overlaps(currentLeftRegion)
+      })
+      .map(y => y._2), currentLeft)
   }
 }
 
-/**
- * A Partitioner that simply passes through the precomputed partition number for the RegionJoin.
- *
- * This is a "hack" partitioner enables the replication of objects into different genome bins.
- * The key should correspond to a pair (region: ReferenceRegion, bin: Int).
- * The Spark partition number corresponds to the genome bin number, and was precomputed
- * with a flatmap to allow for replication into multiple bins.
- *
- * @param partitions should correspond to the number of bins in the corresponding GenomeBins
- */
-private case class ManualRegionPartitioner(partitions: Int) extends Partitioner {
-  override def numPartitions: Int = partitions
-  override def getPartition(key: Any): Int = key match {
-    case (r: ReferenceRegion, p: Int) => p
-    case _                            => throw new AssertionError("Unexpected key in ManualRegionPartitioner")
+case class InnerShuffleRegionJoin[T: ClassTag, U: ClassTag](leftRdd: RDD[(ReferenceRegion, T)],
+                                                            rightRdd: RDD[(ReferenceRegion, U)])
+    extends VictimlessSortedIntervalPartitionJoin[T, U, T, U] {
+
+  /**
+   * Handles the case where either the left or the right iterator were empty.
+   * In the case of inner join, we return an empty iterator.
+   *
+   * @param left The left iterator.
+   * @param right The right iterator.
+   * @return An empty iterator.
+   */
+  protected def emptyFn(left: Iterator[(ReferenceRegion, T)],
+                        right: Iterator[(ReferenceRegion, U)]): Iterator[(T, U)] = {
+    Iterator.empty
+  }
+
+  /**
+   * Computes post processing required to complete the join and properly format
+   * hits.
+   *
+   * @param iter The iterable of hits.
+   * @param currentLeft The current value from the left iterator.
+   * @return The post processed iterable.
+   */
+  protected def postProcessHits(iter: Iterable[U],
+                                currentLeft: T): Iterable[(T, U)] = {
+    // no post-processing required
+    iter.map(f => (currentLeft, f))
   }
 }
 
-/**
- * Implementation of a "chromosome sweep" sort-merge join.
- *
- * This implementation is based on the implementation used in bedtools:
- * https://github.com/arq5x/bedtools2
- *
- * Given two iterators of ReferenceRegions in sorted order, sweep across the relevant
- * region of the genome to emit pairs of overlapping regions.  Compared with the bedtools impl,
- * and to ensure no duplication of joined records, a joined pair is emitted only if at least
- * one of the two regions starts in the corresponding genome bin.  For this reason, we must
- * take in the partition's genome coords
- *
- * @param binRegion The ReferenceRegion corresponding to this partition, to ensure no duplicate
- *                  join results across the whole RDD
- * @param leftIter The left iterator
- * @param rightIter The right iterator
- * @tparam T type of leftIter
- * @tparam U type of rightIter
- */
-private case class SortedIntervalPartitionJoin[T, U](
-  binRegion: ReferenceRegion,
-  leftIter: Iterator[((ReferenceRegion, Int), T)],
-  rightIter: Iterator[((ReferenceRegion, Int), U)])
-    extends Iterator[(T, U)] with Serializable {
-  // inspired by bedtools2 chromsweep
-  private val left: BufferedIterator[((ReferenceRegion, Int), T)] = leftIter.buffered
-  private val right: BufferedIterator[((ReferenceRegion, Int), U)] = rightIter.buffered
-  // stores the current set of joined pairs
-  private var hits: List[(T, U)] = List.empty
-  // stores the rightIter values that might overlap the current value from the leftIter
-  private val cache: ListBuffer[(ReferenceRegion, U)] = ListBuffer.empty
-  private var prevLeftRegion: ReferenceRegion = _
+case class InnerShuffleRegionJoinAndGroupByLeft[T: ClassTag, U: ClassTag](leftRdd: RDD[(ReferenceRegion, T)],
+                                                                          rightRdd: RDD[(ReferenceRegion, U)])
+    extends VictimlessSortedIntervalPartitionJoin[T, U, T, Iterable[U]] {
 
-  private def advanceCache(until: Long): Unit = {
-    while (right.hasNext && right.head._1._1.start < until) {
+  /**
+   * Handles the case where either the left or the right iterator were empty.
+   * In the case of inner join, we return an empty iterator.
+   *
+   * @param left The left iterator.
+   * @param right The right iterator.
+   * @return An empty iterator.
+   */
+  protected def emptyFn(left: Iterator[(ReferenceRegion, T)],
+                        right: Iterator[(ReferenceRegion, U)]): Iterator[(T, Iterable[U])] = {
+    Iterator.empty
+  }
+
+  /**
+   * Computes post processing required to complete the join and properly format
+   * hits.
+   *
+   * @param iter The iterator containing all hits.
+   * @param currentLeft The current left value.
+   * @return The post processed iterator.
+   */
+  protected def postProcessHits(iter: Iterable[U],
+                                currentLeft: T): Iterable[(T, Iterable[U])] = {
+    if (iter.nonEmpty) {
+      // group all hits for currentLeft into an iterable
+      Iterable((currentLeft, iter.toIterable))
+    } else {
+      Iterable.empty
+    }
+  }
+}
+
+case class LeftOuterShuffleRegionJoin[T: ClassTag, U: ClassTag](leftRdd: RDD[(ReferenceRegion, T)],
+                                                                rightRdd: RDD[(ReferenceRegion, U)])
+    extends VictimlessSortedIntervalPartitionJoin[T, U, T, Option[U]] {
+
+  /**
+   * Handles the case where the left or the right iterator were empty.
+   *
+   * @param left The left iterator.
+   * @param right The right iterator.
+   * @return The iterator containing properly formatted tuples.
+   */
+  protected def emptyFn(left: Iterator[(ReferenceRegion, T)],
+                        right: Iterator[(ReferenceRegion, U)]): Iterator[(T, Option[U])] = {
+    left.map(t => (t._2, None))
+  }
+
+  /**
+   * Computes post processing required to complete the join and properly format
+   * hits.
+   *
+   * @param iter The iterator of hits.
+   * @param currentLeft The current left value.
+   * @return the post processed iterator.
+   */
+  protected def postProcessHits(iter: Iterable[U],
+                                currentLeft: T): Iterable[(T, Option[U])] = {
+    if (iter.nonEmpty) {
+      // left has some hits
+      iter.map(f => (currentLeft, Some(f)))
+    } else {
+      // left has no hits
+      Iterable((currentLeft, None))
+    }
+  }
+}
+
+case class LeftOuterShuffleRegionJoinAndGroupByLeft[T: ClassTag, U: ClassTag](leftRdd: RDD[(ReferenceRegion, T)],
+                                                                              rightRdd: RDD[(ReferenceRegion, U)])
+    extends VictimlessSortedIntervalPartitionJoin[T, U, T, Iterable[U]] {
+
+  /**
+   * Handles the case where the left or the right iterator were empty.
+   *
+   * @param left The left iterator.
+   * @param right The right iterator.
+   * @return The iterator containing properly formatted tuples.
+   */
+  protected def emptyFn(left: Iterator[(ReferenceRegion, T)],
+                        right: Iterator[(ReferenceRegion, U)]): Iterator[(T, Iterable[U])] = {
+    left.map(t => (t._2, Iterable.empty[U]))
+  }
+
+  /**
+   * Computes post processing required to complete the join and properly format
+   * hits.
+   *
+   * @param iter The iterator of hits.
+   * @param currentLeft The current left value.
+   * @return the post processed iterator.
+   */
+  protected def postProcessHits(iter: Iterable[U],
+                                currentLeft: T): Iterable[(T, Iterable[U])] = {
+    if (iter.nonEmpty) {
+      // left has some hits
+      Iterable((currentLeft, iter))
+    } else {
+      // left has no hits
+      Iterable((currentLeft, Iterable.empty[U]))
+    }
+  }
+}
+
+case class FullOuterShuffleRegionJoin[T: ClassTag, U: ClassTag](leftRdd: RDD[(ReferenceRegion, T)],
+                                                                rightRdd: RDD[(ReferenceRegion, U)])
+    extends SortedIntervalPartitionJoinWithVictims[T, U, Option[T], Option[U]] {
+
+  /**
+   * Handles the case where the left or the right iterator were empty.
+   *
+   * @param left The left iterator.
+   * @param right The right iterator.
+   * @return The iterator containing properly formatted tuples.
+   */
+  protected def emptyFn(left: Iterator[(ReferenceRegion, T)],
+                        right: Iterator[(ReferenceRegion, U)]): Iterator[(Option[T], Option[U])] = {
+    left.map(t => (Some(t._2), None)) ++ right.map(u => (None, Some(u._2)))
+  }
+
+  /**
+   * Computes post processing required to complete the join and properly format
+   * hits.
+   *
+   * @param iter The iterator of hits.
+   * @param currentLeft The current left value for the join.
+   * @return the post processed iterator.
+   */
+  protected def postProcessHits(iter: Iterable[U],
+                                currentLeft: T): Iterable[(Option[T], Option[U])] = {
+    if (iter.nonEmpty) {
+      // formatting these as options for the full outer join
+      iter.map(u => (Some(currentLeft), Some(u)))
+    } else {
+      // no hits for the currentLeft
+      Iterable((Some(currentLeft), None))
+    }
+  }
+
+  /**
+   * Properly formats right values that did not join with a left.
+   *
+   * @param pruned The right value with no join.
+   * @return The formatted tuple containing the right value.
+   */
+  protected def postProcessPruned(pruned: U): (Option[T], Option[U]) = {
+    (None, Some(pruned))
+  }
+}
+
+case class RightOuterShuffleRegionJoinAndGroupByLeft[T: ClassTag, U: ClassTag](leftRdd: RDD[(ReferenceRegion, T)],
+                                                                               rightRdd: RDD[(ReferenceRegion, U)])
+    extends SortedIntervalPartitionJoinWithVictims[T, U, Option[T], Iterable[U]] {
+
+  /**
+   * Handles the case where one of the iterators contains no data.
+   *
+   * @param left The left iterator.
+   * @param right The right iterator.
+   * @return The iterator containing properly formatted tuples.
+   */
+  protected def emptyFn(left: Iterator[(ReferenceRegion, T)],
+                        right: Iterator[(ReferenceRegion, U)]): Iterator[(Option[T], Iterable[U])] = {
+
+    left.map(v => (Some(v._2), Iterable.empty)) ++
+      right.map(v => (None, Iterable(v._2)))
+  }
+
+  /**
+   * Computes post processing required to complete the join and properly format
+   * hits.
+   *
+   * @param iter The iterator of all hits
+   * @param currentLeft The current left value.
+   * @return The post processed iterator.
+   */
+  protected def postProcessHits(iter: Iterable[U],
+                                currentLeft: T): Iterable[(Option[T], Iterable[U])] = {
+    Iterable((Some(currentLeft), iter.toIterable))
+  }
+
+  /**
+   * Properly formats right values that did not join with a region on the left.
+   *
+   * @param pruned The right value that did not join.
+   * @return A tuple with the postProcessed right value.
+   */
+  protected def postProcessPruned(pruned: U): (Option[T], Iterable[U]) = {
+    (None, Iterable(pruned))
+  }
+}
+
+sealed trait VictimlessSortedIntervalPartitionJoin[T, U, RT, RU]
+    extends ShuffleRegionJoin[T, U, RT, RU] {
+
+  /**
+   * Adds elements from right to cache based on the next region encountered.
+   *
+   * @param cache The cache for this partition.
+   * @param right The right iterator.
+   * @param until The next region to join with.
+   */
+  protected def advanceCache(cache: SetTheoryCache[U, RT, RU],
+                             right: BufferedIterator[(ReferenceRegion, U)],
+                             until: ReferenceRegion) = {
+    while (right.hasNext &&
+      (right.head._1.compareTo(until) <= 0 || right.head._1.covers(until))) {
+
       val x = right.next()
-      cache += x._1._1 -> x._2
+      cache.cache += ((x._1, x._2))
     }
   }
 
-  private def pruneCache(to: Long): Unit = {
-    cache.dropWhile(_._1.end <= to)
-  }
+  /**
+   * Removes elements from cache in place that do not meet the condition for
+   * the next region.
+   *
+   * @note At one point these were all variables and we built new collections
+   * and reassigned the pointers every time. We fixed this by using trimStart()
+   * and ++=() to improve performance. Overall, we see roughly 25% improvement
+   * in runtime by doing things this way.
+   *
+   * @param cache The cache for this partition.
+   * @param to The next region in the left iterator.
+   */
+  protected def pruneCache(cache: SetTheoryCache[U, RT, RU],
+                           to: ReferenceRegion) {
+    cache.cache.trimStart({
+      val trimLocation =
+        cache
+          .cache
+          .indexWhere(f => !(f._1.compareTo(to) < 0 && !f._1.covers(to)))
 
-  private def getHits(): Unit = {
-    // if there is nothing more in left, then I'm done
-    while (left.hasNext && hits.isEmpty) {
-      // there is more in left...
-      val ((nextLeftRegion, _), nextLeft) = left.next
-      // ...so check whether I need to advance the cache
-      // (where nextLeftRegion's end is further than prevLeftRegion's end)...
-      // (the null checks are for the first iteration)
-      if (prevLeftRegion == null || nextLeftRegion.end > prevLeftRegion.end) {
-        advanceCache(nextLeftRegion.end)
+      if (trimLocation < 0) {
+        0
+      } else {
+        trimLocation
       }
-      // ...and whether I need to prune the cache
-      if (prevLeftRegion == null || nextLeftRegion.start > prevLeftRegion.start) {
-        pruneCache(nextLeftRegion.start)
+    })
+  }
+
+  /**
+   * Computes all victims for the partition. NOTE: These are victimless joins
+   * so we have no victims.
+   *
+   * @param cache The cache for this partition.
+   * @param right The right iterator.
+   * @return An empty iterator.
+   */
+  protected def finalizeHits(cache: SetTheoryCache[U, RT, RU],
+                             right: BufferedIterator[(ReferenceRegion, U)]): Iterable[(RT, RU)] = {
+    Iterable.empty
+  }
+}
+
+sealed trait SortedIntervalPartitionJoinWithVictims[T, U, RT, RU]
+    extends ShuffleRegionJoin[T, U, RT, RU] {
+
+  protected def postProcessPruned(pruned: U): (RT, RU)
+
+  /**
+   * Adds elements from right to victimCache based on the next region
+   * encountered.
+   *
+   * @param cache The cache for this partition.
+   * @param right The right iterator.
+   * @param until The next value on the left to perform the join.
+   */
+  protected def advanceCache(cache: SetTheoryCache[U, RT, RU],
+                             right: BufferedIterator[(ReferenceRegion, U)],
+                             until: ReferenceRegion) = {
+    while (right.hasNext &&
+      (right.head._1.compareTo(until) <= 0 || right.head._1.covers(until))) {
+
+      val x = right.next()
+      cache.victimCache += ((x._1, x._2))
+    }
+  }
+
+  /**
+   * Removes elements from cache in place that do not meet the condition for
+   * join. Also adds the elements that are not hits to the list of pruned.
+   *
+   * @param cache The cache for this partition.
+   * @param to The next region in the left iterator.
+   */
+  protected def pruneCache(cache: SetTheoryCache[U, RT, RU],
+                           to: ReferenceRegion) {
+    // remove everything from cache that will never again be joined
+    cache.cache.trimStart({
+      val trimLocation =
+        cache.cache
+          .indexWhere(f => !(f._1.compareTo(to) < 0 && !f._1.covers(to)))
+
+      if (trimLocation < 0) {
+        0
+      } else {
+        trimLocation
       }
-      // at this point, we effectively do a cross-product and filter; this could probably
-      // be improved by making cache a fancier data structure than just a list
-      // we filter for things that overlap, where at least one side of the join has a start position
-      // in this partition
-      hits = cache
-        .filter(y => {
-          y._1.overlaps(nextLeftRegion) &&
-            (y._1.start >= binRegion.start || nextLeftRegion.start >= binRegion.start)
-        })
-        .map(y => (nextLeft, y._2))
-        .toList
-      prevLeftRegion = nextLeftRegion
-    }
+    })
+
+    // add the values from the victimCache that are candidates to be joined
+    // the the current left
+    val cacheAddition =
+      cache
+        .victimCache
+        .takeWhile(f => f._1.compareTo(to) > 0 || f._1.covers(to))
+
+    cache.cache ++= cacheAddition
+    // remove the values from the victimCache that were just added to cache
+    cache.victimCache.trimStart(cacheAddition.size)
+
+    // add to pruned any values that do not have any matches to a left
+    // and perform post processing to format the new pruned values
+    val prunedAddition =
+      cache
+        .victimCache
+        .takeWhile(f => f._1.compareTo(to) <= 0)
+    cache.pruned ++= prunedAddition
+      .map(u => postProcessPruned(u._2))
+    // remove the values from victimCache that were added to pruned
+    cache.victimCache.trimStart(prunedAddition.size)
   }
 
-  def hasNext: Boolean = {
-    // if the list of current hits is empty, try to refill it by moving forward
-    if (hits.isEmpty) {
-      getHits()
-    }
-    // if hits is still empty, I must really be at the end
-    !hits.isEmpty
+  /**
+   * Computes all victims for the partition. If there are any remaining values
+   * in the right iterator, those are considered victims.
+   *
+   * @param cache The cache for this partition.
+   * @param right The right iterator containing unmatched regions.
+   * @return An iterable containing all pruned hits.
+   */
+  override protected def finalizeHits(cache: SetTheoryCache[U, RT, RU],
+                                      right: BufferedIterator[(ReferenceRegion, U)]): Iterable[(RT, RU)] = {
+    cache.pruned ++
+      right.map(f => postProcessPruned(f._2))
   }
+}
 
-  def next: (T, U) = {
-    val popped = hits.head
-    hits = hits.tail
-    popped
-  }
+private class SetTheoryCache[U, RT, RU] {
+  // caches potential hits
+  val cache: ListBuffer[(ReferenceRegion, U)] = ListBuffer.empty
+  // caches potential pruned and joined values
+  val victimCache: ListBuffer[(ReferenceRegion, U)] = ListBuffer.empty
+  // the pruned values that do not contain any hits from the left
+  val pruned: ListBuffer[(RT, RU)] = ListBuffer.empty
 }
